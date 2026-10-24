@@ -50,7 +50,7 @@ export class TopLoggerError extends Error {
 
 /** Paste this into the browser console on app.toplogger.nu (while signed in) to copy the refresh token. */
 export const TOPLOGGER_TOKEN_SNIPPET =
-  "copy(Object.values(localStorage).map(v=>{try{const j=JSON.parse(v);return j?.refresh?.token??j?.tokens?.refresh?.token}catch{}}).find(Boolean)??'not found')";
+  "copy(JSON.parse(localStorage.getItem('tl-auth')??'null')?.refresh?.token??'not found')";
 
 export function readTopLoggerAuth(): TopLoggerAuth | undefined {
   const raw = localStorage.getItem(AUTH_STORAGE_KEY);
@@ -111,6 +111,8 @@ async function refreshTokens(auth: TopLoggerAuth): Promise<TopLoggerAuth> {
       }
     }`,
     { refreshToken: auth.refreshToken },
+    // TopLogger's own client also sends the refresh token as the bearer token; without it the API returns Unauthorized.
+    auth.refreshToken,
   );
 
   const next: TopLoggerAuth = {
