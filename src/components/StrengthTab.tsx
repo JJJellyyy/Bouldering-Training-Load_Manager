@@ -1,5 +1,4 @@
 import { useMemo, useState } from "react";
-import { getAcwrZone } from "../domain/loadCalculator";
 import {
   buildStrengthHistory,
   calculateSetLoads,
@@ -9,9 +8,11 @@ import {
 } from "../domain/strengthLoad";
 import type { AppSettings, StrengthLoadMetric, StrengthSet } from "../types";
 import { AcwrHistoryChart } from "./AcwrHistoryChart";
+import { RangePills } from "./Chrome";
 import { NumberInput } from "./NumberInput";
+import { ZoneBadge } from "./ZoneBadge";
 
-type RangeDays = 28 | 56 | 90 | 180 | 365 | null;
+type RangeDays = 28 | 90 | 180 | 365 | null;
 
 interface StrengthTabProps {
   settings: AppSettings;
@@ -29,12 +30,9 @@ const METRIC_LABELS: Record<StrengthLoadMetric, string> = {
   sets: "Hard sets (1 per set)",
 };
 
-function zoneClass(acwr: number, settings: AppSettings): string {
-  return getAcwrZone(acwr, settings.model.acwr.lowThreshold, settings.model.acwr.highThreshold).toLowerCase().replace(" ", "-");
-}
-
 function GroupTable({ rows, settings, label }: { rows: StrengthGroupRow[]; settings: AppSettings; label: string }) {
   return (
+    <div className="table-scroll">
     <table>
       <thead>
         <tr>
@@ -52,15 +50,18 @@ function GroupTable({ rows, settings, label }: { rows: StrengthGroupRow[]; setti
           <tr key={row.key}>
             <td>{row.key}</td>
             <td>{row.lastDate}</td>
-            <td>{row.setCount}</td>
-            <td>{row.acute.toFixed(2)}</td>
-            <td>{row.chronic.toFixed(2)}</td>
-            <td>{row.acwr.toFixed(2)}</td>
-            <td>{getAcwrZone(row.acwr, settings.model.acwr.lowThreshold, settings.model.acwr.highThreshold)}</td>
+            <td className="num">{row.setCount}</td>
+            <td className="num">{row.acute.toFixed(2)}</td>
+            <td className="num">{row.chronic.toFixed(2)}</td>
+            <td className="num">{row.acwr.toFixed(2)}</td>
+            <td>
+              <ZoneBadge acwr={row.acwr} low={settings.model.acwr.lowThreshold} high={settings.model.acwr.highThreshold} />
+            </td>
           </tr>
         ))}
       </tbody>
     </table>
+    </div>
   );
 }
 
@@ -95,30 +96,28 @@ export function StrengthTab({
       <article className="panel">
         <h2>Strength ACWR</h2>
         {!current ? (
-          <p>Import a FitNotes export to see your strength ACWR.</p>
+          <p className="empty-note">Import a FitNotes export to see your strength ACWR.</p>
         ) : (
-          <div className="overall-acwr-stat">
-            <span className={`acwr-big ${zoneClass(current.acwr, settings)}`}>{current.acwr.toFixed(2)}</span>
-            <span className="acwr-zone-label">
-              {getAcwrZone(current.acwr, settings.model.acwr.lowThreshold, settings.model.acwr.highThreshold)}
-            </span>
-            <p className="acwr-range-hint">
+          <div className="hero-figure">
+            <span className="hero-figure-value">{current.acwr.toFixed(2)}</span>
+            <ZoneBadge acwr={current.acwr} low={settings.model.acwr.lowThreshold} high={settings.model.acwr.highThreshold} />
+            <p className="muted-hint">
               Acute ({config.acuteWindow}d) {current.acute.toFixed(1)} / Chronic ({config.chronicWindow}d) {current.chronic.toFixed(1)}
-              {" "}| Goldilocks: {settings.model.acwr.lowThreshold.toFixed(2)} – {settings.model.acwr.highThreshold.toFixed(2)}
+              {" "}· sweet spot {settings.model.acwr.lowThreshold.toFixed(2)}–{settings.model.acwr.highThreshold.toFixed(2)}
             </p>
           </div>
         )}
       </article>
 
       <article className="panel">
-        <h2>FitNotes Import</h2>
+        <h2>FitNotes import</h2>
         <p className="muted-hint">
           Export your workouts from FitNotes as CSV (a <code>FitNotes_Export_….csv</code> file). Upload it here, or save it
           to Google Drive and sync. Each import replaces all strength data, since the export holds your full history.
         </p>
         <div className="metric-row">
           <label className="file-import-label">
-            ⬆ Upload FitNotes CSV
+            Upload FitNotes CSV
             <input
               type="file"
               accept=".csv,text/csv"
@@ -130,7 +129,7 @@ export function StrengthTab({
               }}
             />
           </label>
-          <button type="button" onClick={onSyncFromDrive} disabled={!driveConnected || syncing}>
+          <button type="button" className="primary" onClick={onSyncFromDrive} disabled={!driveConnected || syncing}>
             {syncing ? "Syncing…" : "Sync latest export from Google Drive"}
           </button>
         </div>
@@ -154,9 +153,9 @@ export function StrengthTab({
         )}
       </article>
 
-      <article className="panel">
-        <h2>Strength Load Model</h2>
-        <div className="field-grid">
+      <article className="panel full-width">
+        <h2>Strength load model</h2>
+        <div className="field-grid field-grid-4">
           <label>
             Load metric
             <select
@@ -223,42 +222,46 @@ export function StrengthTab({
 
       <article className="panel full-width">
         <div className="panel-header-row">
-          <h2>Strength ACWR History</h2>
-          <select
-            className="range-select"
-            value={range ?? "all"}
-            onChange={(event) => setRange(event.target.value === "all" ? null : (Number(event.target.value) as RangeDays))}
-          >
-            <option value={28}>Last 28 days</option>
-            <option value={56}>Last 8 weeks</option>
-            <option value={90}>Last 90 days</option>
-            <option value={180}>Last 6 months</option>
-            <option value={365}>Last year</option>
-            <option value="all">All time</option>
-          </select>
+          <div className="panel-heading">
+            <h2>Strength ACWR over time</h2>
+            <p className="muted-hint">From your FitNotes sets, using the load metric above.</p>
+          </div>
+          <RangePills
+            label="Strength chart range"
+            value={range}
+            onChange={setRange}
+            options={[
+              { value: 28, label: "4 wk" },
+              { value: 90, label: "3 mo" },
+              { value: 180, label: "6 mo" },
+              { value: 365, label: "1 yr" },
+              { value: null, label: "All" },
+            ]}
+          />
         </div>
         {visibleHistory.length < 2 ? (
-          <p>Not enough strength history in this range.</p>
+          <p className="empty-note">Not enough strength history in this range.</p>
         ) : (
           <AcwrHistoryChart
             points={visibleHistory}
             lowThreshold={settings.model.acwr.lowThreshold}
             highThreshold={settings.model.acwr.highThreshold}
             targetAcwr={settings.model.acwr.targetAcwr}
+            loadLabel="Daily strength load"
           />
         )}
       </article>
 
       {categoryRows.length > 0 && (
         <article className="panel full-width">
-          <h2>ACWR by Category</h2>
+          <h2>By category</h2>
           <GroupTable rows={categoryRows} settings={settings} label="Category" />
         </article>
       )}
 
       {exerciseRows.length > 0 && (
         <article className="panel full-width">
-          <h2>ACWR by Exercise</h2>
+          <h2>By exercise</h2>
           <p className="muted-hint">
             Tick "+BW" for exercises where FitNotes logs only the added weight (pull-ups, dips…), so your bodyweight counts too.
           </p>
@@ -284,7 +287,9 @@ export function StrengthTab({
                     <td>{row.lastDate}</td>
                     <td>{row.setCount}</td>
                     <td>{row.acwr.toFixed(2)}</td>
-                    <td>{getAcwrZone(row.acwr, settings.model.acwr.lowThreshold, settings.model.acwr.highThreshold)}</td>
+                    <td>
+                      <ZoneBadge acwr={row.acwr} low={settings.model.acwr.lowThreshold} high={settings.model.acwr.highThreshold} />
+                    </td>
                     <td>
                       <input
                         type="checkbox"

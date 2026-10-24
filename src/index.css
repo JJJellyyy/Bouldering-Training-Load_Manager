@@ -1,38 +1,199 @@
+/* ── Design tokens ───────────────────────────────────────────────
+   Warm chalk-paper surfaces, forest accent, earthy chart series.
+   Chart series 1–4 and status colours are validated for colour-vision
+   deficiency against --surface in both themes (dataviz validator). */
 :root {
-  --bg: #f6efe3;
-  --text: #15222e;
-  --muted: #476071;
-  --brand: #0f7f88;
-  --border: #c7d2d8;
+  color-scheme: light;
 
-  font-family: "Space Grotesk", "Avenir Next", "Segoe UI", sans-serif;
-  line-height: 1.45;
+  --font-sans: "DM Sans", "Avenir Next", "Segoe UI", system-ui, sans-serif;
+  --font-display: "Fraunces", Georgia, "Times New Roman", serif;
+
+  --bg: #f3ede1;
+  --surface: #fbf7ef;
+  --surface-raised: #fffdf8;
+  --surface-sunken: #efe8da;
+  --border: #e3dac8;
+  --border-strong: #cdbfa6;
+
+  --ink: #23281f;
+  --ink-secondary: #585d50;
+  --ink-muted: #7d8072;
+
+  --accent: #2f5d46;
+  --accent-hover: #244a37;
+  --accent-ink: #f7f3ea;
+  --accent-soft: rgba(47, 93, 70, 0.12);
+  --clay: #b0582f;
+
+  --grid: #e8e0d0;
+  --axis: #c9bb9f;
+
+  --series-1: #008a7a;
+  --series-2: #7a56b0;
+  --series-3: #c7742a;
+  --series-4: #2f8fd8;
+
+  --status-good: #3f8a3a;
+  --status-warning: #c98a12;
+  --status-critical: #c0442c;
+  --status-good-ink: #2b6427;
+  --status-warning-ink: #835a05;
+  --status-critical-ink: #962f1c;
+
+  --hero-bg: linear-gradient(160deg, #2f4f3d 0%, #213a2d 55%, #1b3026 100%);
+  --hero-ink: #f4efe2;
+  --hero-ink-soft: rgba(244, 239, 226, 0.72);
+  --hero-tile: rgba(255, 252, 244, 0.09);
+  --hero-tile-border: rgba(255, 252, 244, 0.16);
+  --ridge-far: #3d634d;
+  --ridge-near: #f3ede1;
+
+  --topo-stroke: rgba(120, 96, 60, 0.09);
+  --shadow: 0 1px 2px rgba(60, 45, 20, 0.05), 0 10px 30px -16px rgba(60, 45, 20, 0.28);
+  --shadow-pop: 0 12px 32px -10px rgba(40, 30, 15, 0.35);
+  --radius: 20px;
+  --radius-sm: 12px;
+
+  font-family: var(--font-sans);
+  line-height: 1.5;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* Night theme: same hues, stepped for the dark surface (not an automatic flip). */
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --bg: #131713;
+    --surface: #1f2420;
+    --surface-raised: #262c27;
+    --surface-sunken: #191d1a;
+    --border: #2f3730;
+    --border-strong: #414a42;
+    --ink: #ece7da;
+    --ink-secondary: #b8b4a5;
+    --ink-muted: #8d8d80;
+    --accent: #7fbf95;
+    --accent-hover: #97d0aa;
+    --accent-ink: #13201a;
+    --accent-soft: rgba(127, 191, 149, 0.14);
+    --clay: #e0915f;
+    --grid: #2a312b;
+    --axis: #434c44;
+    --series-1: #13917f;
+    --series-2: #8f62c9;
+    --series-3: #c47a2e;
+    --series-4: #2f8ee0;
+    --status-good: #5aa552;
+    --status-warning: #d9a03a;
+    --status-critical: #e0634a;
+    --status-good-ink: #9bd892;
+    --status-warning-ink: #f1c878;
+    --status-critical-ink: #f4a593;
+    --hero-bg: linear-gradient(160deg, #1d2e24 0%, #16241c 60%, #111c16 100%);
+    --ridge-far: #22372b;
+    --ridge-near: #131713;
+    --topo-stroke: rgba(200, 220, 190, 0.05);
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 32px -18px rgba(0, 0, 0, 0.7);
+    --shadow-pop: 0 14px 36px -10px rgba(0, 0, 0, 0.7);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #131713;
+  --surface: #1f2420;
+  --surface-raised: #262c27;
+  --surface-sunken: #191d1a;
+  --border: #2f3730;
+  --border-strong: #414a42;
+  --ink: #ece7da;
+  --ink-secondary: #b8b4a5;
+  --ink-muted: #8d8d80;
+  --accent: #7fbf95;
+  --accent-hover: #97d0aa;
+  --accent-ink: #13201a;
+  --accent-soft: rgba(127, 191, 149, 0.14);
+  --clay: #e0915f;
+  --grid: #2a312b;
+  --axis: #434c44;
+  --series-1: #13917f;
+  --series-2: #8f62c9;
+  --series-3: #c47a2e;
+  --series-4: #2f8ee0;
+  --status-good: #5aa552;
+  --status-warning: #d9a03a;
+  --status-critical: #e0634a;
+  --status-good-ink: #9bd892;
+  --status-warning-ink: #f1c878;
+  --status-critical-ink: #f4a593;
+  --hero-bg: linear-gradient(160deg, #1d2e24 0%, #16241c 60%, #111c16 100%);
+  --ridge-far: #22372b;
+  --ridge-near: #131713;
+  --topo-stroke: rgba(200, 220, 190, 0.05);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 32px -18px rgba(0, 0, 0, 0.7);
+  --shadow-pop: 0 14px 36px -10px rgba(0, 0, 0, 0.7);
+}
+
 * {
   box-sizing: border-box;
 }
 
+html {
+  background: var(--bg);
+}
+
 body {
   margin: 0;
-  color: var(--text);
   min-height: 100vh;
-  background:
-    linear-gradient(125deg, rgba(255, 147, 41, 0.15), transparent 45%),
-    radial-gradient(circle at 15% 30%, rgba(28, 114, 144, 0.22), transparent 30%),
-    var(--bg);
+  color: var(--ink);
+  background-color: var(--bg);
+  /* Faint topographic contours, drawn in CSS so they follow the theme. */
+  background-image:
+    repeating-radial-gradient(ellipse 120% 80% at 12% 18%, transparent 0 34px, var(--topo-stroke) 34px 35px),
+    repeating-radial-gradient(ellipse 90% 120% at 92% 78%, transparent 0 42px, var(--topo-stroke) 42px 43px);
+  background-attachment: fixed;
 }
 
 h1,
 h2,
-h3 {
+h3,
+h4 {
   margin: 0 0 0.5rem;
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+  font-optical-sizing: auto;
 }
 
 p {
   margin: 0;
+}
+
+a {
+  color: var(--accent);
+  text-underline-offset: 3px;
+}
+
+code {
+  font-family: "JetBrains Mono", ui-monospace, "Cascadia Code", monospace;
+  font-size: 0.85em;
+  background: var(--surface-sunken);
+  border-radius: 6px;
+  padding: 0.05rem 0.35rem;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
 }

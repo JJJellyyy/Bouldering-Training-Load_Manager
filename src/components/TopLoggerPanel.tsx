@@ -33,7 +33,7 @@ export function TopLoggerPanel({
         <h2>TopLogger Sync</h2>
         {auth && (
           <div className="metric-row">
-            <button type="button" onClick={onSync} disabled={syncing}>
+            <button type="button" className="primary" onClick={onSync} disabled={syncing}>
               {syncing ? "Syncing…" : "Sync now"}
             </button>
             <button type="button" className="danger" onClick={onDisconnect}>Disconnect</button>
@@ -68,6 +68,7 @@ export function TopLoggerPanel({
             />
             <button
               type="button"
+              className="primary"
               disabled={!tokenDraft.trim() || syncing}
               onClick={() => {
                 onConnect(tokenDraft);
@@ -126,6 +127,7 @@ export function TopLoggerPanel({
             >
               <option value="attempted">Every boulder tried</option>
               <option value="sent">Only boulders sent</option>
+              <option value="tries">Every try (5 goes on a project = 5)</option>
             </select>
           </label>
           <label>

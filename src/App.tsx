@@ -25,12 +25,17 @@ import {
   gradeToNumber,
   suggestedCapacityRange,
   buildSessionHistory,
-  buildMovingAverageSeries,
   getAcwrZone,
+  getAcwrZoneKey,
   getSessionDayKey,
-  type HistoryPoint,
 } from "./domain/loadCalculator";
 import { AcwrHistoryChart } from "./components/AcwrHistoryChart";
+import { BrandMark, RangePills, TabIcon, ThemeToggle } from "./components/Chrome";
+import { ColumnChart } from "./components/charts/ColumnChart";
+import { formatCompact, formatLongDate } from "./components/charts/chartUtils";
+import { CurveChart, EwmaWeightsChart, LoadTotalsChart } from "./components/ModelCharts";
+import { ZoneBadge } from "./components/ZoneBadge";
+import { buildStrengthHistory, calculateSetLoads } from "./domain/strengthLoad";
 import { NumberInput } from "./components/NumberInput";
 import { StrengthHistoryTable, StrengthTab } from "./components/StrengthTab";
 import { TopLoggerPanel } from "./components/TopLoggerPanel";
@@ -166,261 +171,6 @@ function getEwmaValue(snapshot: EWMASnapshot, windowDays: number): number {
   return belowValue + t * (aboveValue - belowValue);
 }
 
-interface CurvePoint {
-  x: number;
-  y: number;
-}
-
-interface CurveChartProps {
-  title: string;
-  xLabel: string;
-  yLabel: string;
-  points: CurvePoint[];
-  stroke: string;
-  xFormatter?: (value: number) => string;
-  yFormatter?: (value: number) => string;
-  yLogarithmic?: boolean;
-}
-
-function CurveChart({
-  title,
-  xLabel,
-  yLabel,
-  points,
-  stroke,
-  xFormatter = (value) => value.toFixed(2),
-  yFormatter = (value) => value.toFixed(2),
-  yLogarithmic = false,
-}: CurveChartProps) {
-  const width = 340;
-  const height = 200;
-  const padLeft = 52;
-  const padRight = 16;
-  const padTop = 12;
-  const padBottom = 44;
-
-  if (points.length < 2) {
-    return (
-      <article className="curve-card">
-        <h4>{title}</h4>
-        <p>Not enough data points to draw curve.</p>
-      </article>
-    );
-  }
-
-  const transformY = (v: number) => (yLogarithmic ? Math.log(Math.max(v, 0.001)) : v);
-
-  const minX = Math.min(...points.map((p) => p.x));
-  const maxX = Math.max(...points.map((p) => p.x));
-  const minYT = Math.min(...points.map((p) => transformY(p.y)));
-  const maxYT = Math.max(...points.map((p) => transformY(p.y)));
-  const minY = Math.min(...points.map((p) => p.y));
-  const maxY = Math.max(...points.map((p) => p.y));
-
-  const spanX = Math.max(0.0001, maxX - minX);
-  const spanYT = Math.max(0.0001, maxYT - minYT);
-
-  const toSvgX = (x: number) => padLeft + ((x - minX) / spanX) * (width - padLeft - padRight);
-  const toSvgY = (y: number) => height - padBottom - ((transformY(y) - minYT) / spanYT) * (height - padTop - padBottom);
-
-  const polyline = points.map((p) => `${toSvgX(p.x)},${toSvgY(p.y)}`).join(" ");
-
-  // X axis ticks: 5 evenly spaced
-  const xTicks = Array.from({ length: 5 }, (_, i) => minX + (i / 4) * spanX);
-  // Y axis ticks: 5 evenly spaced (in original scale, not log)
-  const yTicks = Array.from({ length: 5 }, (_, i) => minY + (i / 4) * (maxY - minY));
-
-  return (
-    <article className="curve-card">
-      <h4>{title}{yLogarithmic && <span className="log-badge"> (log scale)</span>}</h4>
-      <svg className="curve-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={title}>
-        {/* Grid lines */}
-        {yTicks.map((v, i) => (
-          <line key={i} x1={padLeft} y1={toSvgY(v)} x2={width - padRight} y2={toSvgY(v)}
-            stroke="currentColor" strokeOpacity="0.08" strokeWidth="1" />
-        ))}
-        {/* Axes */}
-        <line x1={padLeft} y1={height - padBottom} x2={width - padRight} y2={height - padBottom} className="curve-axis" />
-        <line x1={padLeft} y1={padTop} x2={padLeft} y2={height - padBottom} className="curve-axis" />
-        {/* X ticks + labels */}
-        {xTicks.map((v, i) => (
-          <g key={i}>
-            <line x1={toSvgX(v)} y1={height - padBottom} x2={toSvgX(v)} y2={height - padBottom + 4} className="curve-axis" />
-            <text x={toSvgX(v)} y={height - padBottom + 14} textAnchor="middle" fontSize="9" fill="currentColor" opacity="0.6">{xFormatter(v)}</text>
-          </g>
-        ))}
-        {/* Y ticks + labels */}
-        {yTicks.map((v, i) => (
-          <g key={i}>
-            <line x1={padLeft - 4} y1={toSvgY(v)} x2={padLeft} y2={toSvgY(v)} className="curve-axis" />
-            <text x={padLeft - 6} y={toSvgY(v) + 3} textAnchor="end" fontSize="9" fill="currentColor" opacity="0.6">{yFormatter(v)}</text>
-          </g>
-        ))}
-        {/* Axis labels */}
-        <text x={padLeft + (width - padLeft - padRight) / 2} y={height - 4} textAnchor="middle" fontSize="10" fill="currentColor" opacity="0.75">{xLabel}</text>
-        <text x={10} y={padTop + (height - padTop - padBottom) / 2} textAnchor="middle" fontSize="10" fill="currentColor" opacity="0.75"
-          transform={`rotate(-90, 10, ${padTop + (height - padTop - padBottom) / 2})`}>{yLabel}</text>
-        {/* Curve */}
-        <polyline points={polyline} fill="none" stroke={stroke} strokeWidth="2.5" strokeLinecap="round" />
-      </svg>
-    </article>
-  );
-}
-
-function MovingAverageLoadChart({ points, rangeDays }: { points: HistoryPoint[]; rangeDays: number | null }) {
-  const width = 680;
-  const height = 260;
-  const padL = 50;
-  const padR = 16;
-  const padT = 16;
-  const padB = 44;
-  const chartW = width - padL - padR;
-  const chartH = height - padT - padB;
-
-  const windows = [7, 14, 28] as const;
-  const colors = ["#0ea5e9", "#f59e0b", "#22c55e", "#8b5cf6"];
-  const series = windows.map((window, index) => ({
-    window,
-    color: colors[index],
-    points: buildMovingAverageSeries(points, window).map((item) => ({ date: item.date, value: item.average })),
-  }));
-
-  const visiblePoints = rangeDays === null
-    ? points
-    : points.slice(Math.max(0, points.length - rangeDays));
-
-  const seriesWithVisiblePoints = series.map((serie) => ({
-    ...serie,
-    points: buildMovingAverageSeries(visiblePoints, serie.window).map((item) => ({ date: item.date, value: item.average })),
-  }));
-
-  const maxValue = Math.max(1, ...seriesWithVisiblePoints.flatMap((serie) => serie.points.map((point) => point.value)));
-  const minValue = Math.min(0, ...seriesWithVisiblePoints.flatMap((serie) => serie.points.map((point) => point.value)));
-  const ySpan = Math.max(1, maxValue - minValue);
-  const toX = (index: number) => padL + (index / Math.max(1, seriesWithVisiblePoints[0].points.length - 1)) * chartW;
-  const toY = (value: number) => padT + chartH - ((value - minValue) / ySpan) * chartH;
-
-  const xLabels = seriesWithVisiblePoints[0]?.points ?? [];
-  const tickIndices = xLabels.reduce<number[]>((acc, _, index) => {
-    if (index === 0 || index === xLabels.length - 1 || index % Math.max(1, Math.floor(xLabels.length / 5)) === 0) {
-      acc.push(index);
-    }
-    return acc;
-  }, []);
-
-  if (xLabels.length === 0) {
-    return <p>Log a few sessions to see the moving-average graph.</p>;
-  }
-
-  return (
-    <svg className="acwr-history-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Moving average load history">
-      <rect x={padL} y={padT} width={chartW} height={chartH} rx={12} fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.08)" />
-      {Array.from({ length: 4 }, (_, i) => {
-        const y = padT + (i / 3) * chartH;
-        return <line key={i} x1={padL} y1={y} x2={padL + chartW} y2={y} stroke="currentColor" strokeOpacity="0.08" strokeWidth="1" />;
-      })}
-      <line x1={padL} y1={padT + chartH} x2={padL + chartW} y2={padT + chartH} stroke="currentColor" strokeOpacity="0.3" strokeWidth="1" />
-      <line x1={padL} y1={padT} x2={padL} y2={padT + chartH} stroke="currentColor" strokeOpacity="0.3" strokeWidth="1" />
-      {seriesWithVisiblePoints.map((serie) => {
-        const polyline = serie.points.map((point, index) => `${toX(index)},${toY(point.value)}`).join(" ");
-        return (
-          <g key={serie.window}>
-            <polyline points={polyline} fill="none" stroke={serie.color} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
-            {serie.points.map((point, index) => (
-              <circle key={`${serie.window}-${index}`} cx={toX(index)} cy={toY(point.value)} r="2.5" fill={serie.color} opacity="0.85" />
-            ))}
-          </g>
-        );
-      })}
-      {tickIndices.map((index) => (
-        <text key={index} x={toX(index)} y={padT + chartH + 16} textAnchor="middle" fontSize="9" fill="currentColor" opacity="0.6">
-          {xLabels[index]?.date.slice(5) ?? ""}
-        </text>
-      ))}
-      <text x={padL + chartW / 2} y={height - 4} textAnchor="middle" fontSize="10" fill="currentColor" opacity="0.7">Date</text>
-      <text x={10} y={padT + chartH / 2} textAnchor="middle" fontSize="10" fill="currentColor" opacity="0.7" transform={`rotate(-90, 10, ${padT + chartH / 2})`}>Absolute Load</text>
-      <text x={padL + chartW - 12} y={padT + 14} textAnchor="end" fontSize="10" fill="currentColor" opacity="0.7">Prior-window total load</text>
-      {seriesWithVisiblePoints.map((serie, index) => (
-        <g key={`legend-${serie.window}`}>
-          <line x1={padL + 10} y1={padT + 18 + index * 14} x2={padL + 28} y2={padT + 18 + index * 14} stroke={serie.color} strokeWidth="2.2" />
-          <text x={padL + 34} y={padT + 22 + index * 14} fontSize="10" fill="currentColor" opacity="0.75">{serie.window}-day total</text>
-        </g>
-      ))}
-    </svg>
-  );
-}
-
-function EwmaWeightsChart() {
-  // EWMA weight visualization: shows how much each day's value contributes to the EWMA
-  // For window N, alpha = 2 / (N + 1)
-  // Weight for day d (0 = today) = alpha * (1 - alpha)^d
-  
-  const width = 600;
-  const height = 200;
-  const padL = 44;
-  const padR = 16;
-  const padT = 16;
-  const padB = 40;
-  const chartW = width - padL - padR;
-  const chartH = height - padT - padB;
-  
-  const windows: Array<[number, string]> = [[10, "#0f7f88"], [15, "#f97316"], [20, "#8b5cf6"], [25, "#ec4899"]];
-  const daysToShow = 30;
-  
-  // Helper to calculate EWMA weight at day d for window size
-  const getWeight = (dayIndex: number, windowSize: number): number => {
-    const alpha = 2 / (windowSize + 1);
-    return alpha * Math.pow(1 - alpha, dayIndex);
-  };
-  
-  // Calculate max weight for scaling
-  const maxWeight = Math.max(...windows.map(([win]) => getWeight(0, win)));
-  
-  const toY = (weight: number) => padT + chartH - (weight / maxWeight) * chartH;
-  const toX = (dayIndex: number) => padL + (dayIndex / (daysToShow - 1)) * chartW;
-  
-  return (
-    <svg className="ewma-weights-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="EWMA weights decay">
-      {/* Grid */}
-      {[0, 10, 20, 30].map((day) => (
-        <line key={`grid-${day}`} x1={toX(day)} y1={padT} x2={toX(day)} y2={padT + chartH} stroke="currentColor" strokeOpacity="0.1" strokeWidth="1" />
-      ))}
-      {/* Lines for each window */}
-      {windows.map(([windowSize, color]) => {
-        const points = Array.from({ length: daysToShow }, (_, i) => {
-          const weight = getWeight(i, windowSize);
-          return `${toX(i)},${toY(weight)}`;
-        }).join(" ");
-        
-        return (
-          <g key={`window-${windowSize}`}>
-            <polyline points={points} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" opacity="0.8" />
-          </g>
-        );
-      })}
-      {/* Axes */}
-      <line x1={padL} y1={padT} x2={padL} y2={padT + chartH} stroke="currentColor" strokeOpacity="0.3" strokeWidth="1" />
-      <line x1={padL} y1={padT + chartH} x2={padL + chartW} y2={padT + chartH} stroke="currentColor" strokeOpacity="0.3" strokeWidth="1" />
-      {/* Day labels */}
-      {[0, 10, 20, 30].map((day) => (
-        <text key={`day-${day}`} x={toX(day)} y={padT + chartH + 14} textAnchor="middle" fontSize="9" fill="currentColor" opacity="0.6">{day}d</text>
-      ))}
-      {/* Weight label */}
-      <text x={6} y={padT + 12} fontSize="9" fill="currentColor" opacity="0.6">Weight</text>
-      {/* Legend */}
-      {windows.map(([windowSize, color], idx) => {
-        const x = padL + 10 + idx * 120;
-        return (
-          <g key={`legend-${windowSize}`}>
-            <line x1={x} y1={padT + 2} x2={x + 12} y2={padT + 2} stroke={color} strokeWidth="2" opacity="0.8" />
-            <text x={x + 18} y={padT + 6} fontSize="9" fill="currentColor" opacity="0.7">{windowSize}d</text>
-          </g>
-        );
-      })}
-    </svg>
-  );
-}
-
 function App() {
   const [tab, setTab] = useState<TabName>(() => {
     const saved = localStorage.getItem("blm_tab");
@@ -445,7 +195,7 @@ function App() {
   const [driveLog, setDriveLog] = useState<string[]>([]);
   const [notification, setNotification] = useState<string | undefined>(undefined);
   // Dashboard history graph
-  const [historyRange, setHistoryRange] = useState<7 | 14 | 21 | 28 | 90 | null>(14);
+  const [historyRange, setHistoryRange] = useState<number | null>(28);
   // Next-session planner
   const [plannerGrade, setPlannerGrade] = useState<Grade>("V5");
   const [plannerCount, setPlannerCount] = useState<number>(20);
@@ -558,18 +308,6 @@ function App() {
       .sort((a, b) => b.acwr - a.acwr);
   }, [ewmaSnapshots, settings.model.acwr]);
 
-  const acwrSummary = useMemo(() => {
-    if (acwrRows.length === 0) {
-      return { avgAcwr: 0, highRiskCount: 0, goldilocksCount: 0 };
-    }
-
-    const avgAcwr = acwrRows.reduce((sum, row) => sum + row.acwr, 0) / acwrRows.length;
-    const highRiskCount = acwrRows.filter((row) => row.zone === "High Risk").length;
-    const goldilocksCount = acwrRows.filter((row) => row.zone === "Goldilocks").length;
-
-    return { avgAcwr, highRiskCount, goldilocksCount };
-  }, [acwrRows]);
-
   // Overall ACWR: sum all acute / sum all chronic across every boulder type snapshot
   const overallAcwr = useMemo(() => {
     const snapshots = Object.values(ewmaSnapshots);
@@ -580,6 +318,21 @@ function App() {
   }, [ewmaSnapshots, settings.model.acwr]);
 
   // Session history for ACWR+Load graph (combined across all types)
+  const fullSessionHistory = useMemo(() => buildSessionHistory(sessions, settings, null), [sessions, settings]);
+
+  const strengthNow = useMemo(() => {
+    const history = buildStrengthHistory(calculateSetLoads(strengthSets, settings.strength), settings.strength);
+    return history.length > 0 ? history[history.length - 1] : null;
+  }, [strengthSets, settings.strength]);
+
+  const recentLoad = useMemo(() => {
+    const lastWeek = fullSessionHistory.slice(-7);
+    return {
+      load: lastWeek.reduce((sum, point) => sum + point.load, 0),
+      climbingDays: lastWeek.filter((point) => point.load > 0).length,
+    };
+  }, [fullSessionHistory]);
+
   const sessionHistory = useMemo(
     () => buildSessionHistory(sessions, settings, historyRange),
     [sessions, settings, historyRange],
@@ -806,7 +559,7 @@ function App() {
       const recovery = calculateSleepRecoveryMultiplier(actualSleep, settings);
       return {
         x: deficit * 100,
-        y: (1 - recovery) * 100,
+        y: (recovery - 1) * 100,
       };
     });
   }, [settings]);
@@ -1301,7 +1054,9 @@ function App() {
       const { importFromDate, lastSyncedAt } = settingsForSync.toplogger;
       // Re-check a few days before the last sync to catch climbs logged late.
       const lastSyncedDay = lastSyncedAt ? shiftIsoDate(lastSyncedAt.slice(0, 10), -3) : undefined;
-      const since = lastSyncedDay && lastSyncedDay > importFromDate ? lastSyncedDay : importFromDate;
+      // Sessions synced before tries were recorded get backfilled with one full re-sync.
+      const needsBackfill = (await loadSessions()).some((item) => item.source === "toplogger" && !item.toplogger);
+      const since = !needsBackfill && lastSyncedDay && lastSyncedDay > importFromDate ? lastSyncedDay : importFromDate;
 
       const { auth: nextAuth, days } = await fetchTopLoggerBoulderDays(auth, since);
       setToploggerAuth(nextAuth);
@@ -1318,7 +1073,12 @@ function App() {
         if (existing?.locallyEdited) continue;
 
         if (existing) {
-          if (problemsSignature(existing.problems) === problemsSignature(synced.problems)) continue;
+          if (
+            problemsSignature(existing.problems) === problemsSignature(synced.problems) &&
+            JSON.stringify(existing.toplogger) === JSON.stringify(synced.toplogger)
+          ) {
+            continue;
+          }
           const merged: SessionInput = {
             ...synced,
             durationMinutes: existing.durationMinutes,
@@ -1510,7 +1270,7 @@ function App() {
   if (loading) {
     return (
       <main className="app-shell">
-        <p>Loading boulder tracker...</p>
+        <p className="loading-note">Chalking up…</p>
       </main>
     );
   }
@@ -1518,80 +1278,121 @@ function App() {
   return (
     <main className="app-shell">
       {notification && <div className="notification">{notification}</div>}
-      <header className="hero-header">
-        <div className="hero-top-row">
-          {googleProfile ? (
-            <div className="profile-chip">
-              {googleProfile.picture ? (
-                <img src={googleProfile.picture} alt={googleProfile.name} className="profile-avatar" referrerPolicy="no-referrer" crossOrigin="anonymous" />
-              ) : (
-                <div className="profile-avatar-fallback">{googleProfile.name.slice(0, 1).toUpperCase()}</div>
-              )}
-              <div>
-                <p className="profile-name">{googleProfile.name}</p>
-                <p className="profile-email">{googleProfile.email}</p>
+      <header className="hero">
+        <div className="hero-bar">
+          <div className="brand">
+            <BrandMark />
+            <div>
+              <p className="brand-name">Boulder Load Manager</p>
+              <p className="brand-tag">Climb hard, recover well, stay on the wall.</p>
+            </div>
+          </div>
+          <div className="hero-actions">
+            <ThemeToggle />
+            {googleProfile ? (
+              <div className="profile-chip">
+                {googleProfile.picture ? (
+                  <img src={googleProfile.picture} alt="" className="profile-avatar" referrerPolicy="no-referrer" crossOrigin="anonymous" />
+                ) : (
+                  <div className="profile-avatar-fallback">{googleProfile.name.slice(0, 1).toUpperCase()}</div>
+                )}
+                <div className="profile-text">
+                  <p className="profile-name">{googleProfile.name}</p>
+                  <p className="profile-email">{googleProfile.email}</p>
+                </div>
+                <button type="button" className="ghost small" onClick={disconnectGoogleDrive}>Sign out</button>
               </div>
-              <button type="button" onClick={disconnectGoogleDrive}>Sign out</button>
-            </div>
-          ) : (
-            <div className="connect-top-col">
-              <button type="button" className="connect-top-btn" onClick={() => { setDriveConnectError(undefined); connectGoogleDrive(); }}>
-                Sign in with Google
-              </button>
-              {driveConnectError && (
-                <>
-                  <p className="drive-connect-error">{driveConnectError}</p>
-                  <p className="drive-connect-hint">⚠️ If Google shows "This app isn't verified", click <strong>Advanced</strong> → <strong>Go to boulder-load-manager.vercel.app</strong> to continue.</p>
-                </>
+            ) : (
+              <div className="connect-top-col">
+                <button type="button" className="primary" onClick={() => { setDriveConnectError(undefined); connectGoogleDrive(); }}>
+                  Sign in with Google
+                </button>
+                {driveConnectError && (
+                  <>
+                    <p className="drive-connect-error">{driveConnectError}</p>
+                    <p className="drive-connect-hint">If Google shows "This app isn't verified", click <strong>Advanced</strong> → <strong>Go to boulder-load-manager.vercel.app</strong> to continue.</p>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="hero-body">
+          <div className="hero-copy">
+            <p className="eyebrow">{formatLongDate(todayIsoDate())}</p>
+            <h1>
+              {overallAcwr === null
+                ? "Welcome to base camp."
+                : {
+                    detraining: "Fresh legs. Room to push.",
+                    goldilocks: "Right in the sweet spot.",
+                    "high-risk": "Easy does it. Load is spiking.",
+                  }[getAcwrZoneKey(overallAcwr, settings.model.acwr.lowThreshold, settings.model.acwr.highThreshold)]}
+            </h1>
+            <p className="hero-sub">
+              Capacity range for a max of {displayGradeLabel(settings.climberMaxGrade)}:{" "}
+              <strong>
+                {displayGradeLabel(gradeFromNumber(capacityRange.min))} – {displayGradeLabel(gradeFromNumber(capacityRange.max))}
+              </strong>
+            </p>
+          </div>
+          <div className="stat-tiles">
+            <article className="stat-tile">
+              <span className="stat-label">Bouldering ACWR</span>
+              <strong className="stat-value">{overallAcwr === null ? "–" : overallAcwr.toFixed(2)}</strong>
+              {overallAcwr !== null && (
+                <ZoneBadge acwr={overallAcwr} low={settings.model.acwr.lowThreshold} high={settings.model.acwr.highThreshold} />
               )}
-            </div>
-          )}
+            </article>
+            <article className="stat-tile">
+              <span className="stat-label">Strength ACWR</span>
+              <strong className="stat-value">{strengthNow ? strengthNow.acwr.toFixed(2) : "–"}</strong>
+              {strengthNow && (
+                <ZoneBadge acwr={strengthNow.acwr} low={settings.model.acwr.lowThreshold} high={settings.model.acwr.highThreshold} />
+              )}
+            </article>
+            <article className="stat-tile">
+              <span className="stat-label">Last 7 days</span>
+              <strong className="stat-value">{formatCompact(recentLoad.load)}</strong>
+              <span className="stat-meta">
+                load · {recentLoad.climbingDays} climbing day{recentLoad.climbingDays === 1 ? "" : "s"}
+              </span>
+            </article>
+            <article className="stat-tile">
+              <span className="stat-label">Sessions logged</span>
+              <strong className="stat-value">{sessions.length}</strong>
+              <span className="stat-meta">
+                {sessions[0] ? `last ${formatLongDate(getSessionDayKey(sessions[0]))}` : "none yet"}
+              </span>
+            </article>
+          </div>
         </div>
-        <div>
-          <p className="eyebrow">Boulder Load Manager</p>
-          <h1>ACWR + EWMA Load Tracking</h1>
-          <p>
-            Capacity range suggestion for max {displayGradeLabel(settings.climberMaxGrade)}: {" "}
-            {displayGradeLabel(gradeFromNumber(capacityRange.min))} to {" "}
-            {displayGradeLabel(gradeFromNumber(capacityRange.max))}
-          </p>
-        </div>
-        <div className="hero-stats">
-          <article>
-            <span>Total Sessions</span>
-            <strong>{sessions.length}</strong>
-          </article>
-          <article>
-            <span>Current Draft</span>
-            <strong>{totalProblems} problems</strong>
-          </article>
-          <article>
-            <span>Avg ACWR</span>
-            <strong>{acwrSummary.avgAcwr.toFixed(2)}</strong>
-          </article>
-        </div>
+        <svg className="hero-ridge" viewBox="0 0 1200 120" preserveAspectRatio="none" aria-hidden="true">
+          <path className="ridge-far" d="M0 120 L0 70 L90 40 L170 66 L260 22 L360 60 L450 34 L560 72 L660 28 L760 58 L860 18 L960 54 L1060 36 L1200 64 L1200 120 Z" />
+          <path className="ridge-near" d="M0 120 L0 92 L120 70 L220 94 L330 64 L430 90 L540 76 L650 100 L760 72 L880 96 L990 78 L1100 98 L1200 84 L1200 120 Z" />
+        </svg>
       </header>
 
       <nav className="tab-nav" aria-label="Main tabs">
-        <button type="button" onClick={() => setTabAndPersist("session")} className={tab === "session" ? "active" : ""}>
-          Session
-        </button>
-        <button
-          type="button"
-          onClick={() => setTabAndPersist("dashboard")}
-          className={tab === "dashboard" ? "active" : ""}
-        >
-          Dashboard
-        </button>
-        <button type="button" onClick={() => setTabAndPersist("strength")} className={tab === "strength" ? "active" : ""}>
-          Strength
-        </button>
-        <button type="button" onClick={() => setTabAndPersist("settings")} className={tab === "settings" ? "active" : ""}>
-          Settings
-        </button>
-        <button type="button" onClick={() => setTabAndPersist("history")} className={tab === "history" ? "active" : ""}>
-          History
-        </button>
+        {([
+          ["session", "Session"],
+          ["dashboard", "Dashboard"],
+          ["strength", "Strength"],
+          ["history", "History"],
+          ["settings", "Settings"],
+        ] as const).map(([name, label]) => (
+          <button
+            key={name}
+            type="button"
+            onClick={() => setTabAndPersist(name)}
+            className={tab === name ? "active" : ""}
+            aria-current={tab === name ? "page" : undefined}
+          >
+            <TabIcon name={name} />
+            {label}
+          </button>
+        ))}
       </nav>
 
       {tab === "session" && (
@@ -1609,7 +1410,7 @@ function App() {
             }}
           />
           <article className="panel">
-            <h2>Quick Problem Entry</h2>
+            <h2>Add problems</h2>
             <div className="field-grid">
               <label>
                 Date
@@ -1660,11 +1461,11 @@ function App() {
                 </select>
               </label>
             </div>
-            <button type="button" onClick={addProblem}>Save To Session</button>
+            <button type="button" className="primary" onClick={addProblem}>Add to session</button>
           </article>
 
           <article className="panel">
-            <h2>Session Context</h2>
+            <h2>How did it feel?</h2>
             {editingSessionId && (
               <p>
                 Editing existing session. Save will update the same history entry and recalculate ACWR/EWMA.
@@ -1747,8 +1548,8 @@ function App() {
             )}
 
             <div className="metric-row">
-              <button type="button" onClick={() => void saveCurrentSession()} disabled={draft.problems.length === 0}>
-                {editingSessionId ? "Update Session And Recalculate" : "Save Session And Update EWMA"}
+              <button type="button" className="primary" onClick={() => void saveCurrentSession()} disabled={draft.problems.length === 0}>
+                {editingSessionId ? "Update session" : "Save session"}
               </button>
               {editingSessionId && (
                 <button type="button" onClick={cancelEditSession}>
@@ -1759,7 +1560,10 @@ function App() {
           </article>
 
           <article className="panel full-width">
-            <h2>Problems In Current Session</h2>
+            <div className="panel-header-row">
+              <h2>This session</h2>
+              <span className="count-chip">{totalProblems} problem{totalProblems === 1 ? "" : "s"}</span>
+            </div>
             {draft.problems.length === 0 && <p>No problems logged yet.</p>}
             {draft.problems.length > 0 && (
               <table>
@@ -1801,44 +1605,67 @@ function App() {
 
       {tab === "dashboard" && (
         <section className="panel-grid">
-          {/* Overall ACWR stat */}
+          <div className="filter-row full-width">
+            <span className="filter-label">Range</span>
+            <RangePills
+              label="Chart date range"
+              value={historyRange}
+              onChange={setHistoryRange}
+              options={[
+                { value: 14, label: "2 wk" },
+                { value: 28, label: "4 wk" },
+                { value: 90, label: "3 mo" },
+                { value: 180, label: "6 mo" },
+                { value: null, label: "All" },
+              ]}
+            />
+          </div>
+
           <article className="panel">
-            <h2>Overall ACWR</h2>
+            <h2>Bouldering ACWR</h2>
             {overallAcwr === null ? (
-              <p>Save a session to see your overall ACWR.</p>
+              <p className="empty-note">Save a session to see your ACWR.</p>
             ) : (
-              <div className="overall-acwr-stat">
-                <span className={`acwr-big ${getAcwrZone(overallAcwr, settings.model.acwr.lowThreshold, settings.model.acwr.highThreshold).toLowerCase().replace(" ", "-")}`}>
-                  {overallAcwr.toFixed(2)}
-                </span>
-                <span className="acwr-zone-label">{getAcwrZone(overallAcwr, settings.model.acwr.lowThreshold, settings.model.acwr.highThreshold)}</span>
-                <p className="acwr-range-hint">Goldilocks: {settings.model.acwr.lowThreshold.toFixed(2)} – {settings.model.acwr.highThreshold.toFixed(2)} | Target: {settings.model.acwr.targetAcwr.toFixed(2)}</p>
+              <div className="hero-figure">
+                <span className="hero-figure-value">{overallAcwr.toFixed(2)}</span>
+                <ZoneBadge acwr={overallAcwr} low={settings.model.acwr.lowThreshold} high={settings.model.acwr.highThreshold} />
+                <p className="muted-hint">
+                  Sweet spot {settings.model.acwr.lowThreshold.toFixed(2)}–{settings.model.acwr.highThreshold.toFixed(2)} · target{" "}
+                  {settings.model.acwr.targetAcwr.toFixed(2)} · windows {settings.model.acwr.acuteWindow}/{settings.model.acwr.chronicWindow} days
+                </p>
               </div>
             )}
           </article>
 
-          {/* ACWR + Load history graph */}
+          <article className="panel">
+            <h2>This week on the wall</h2>
+            <dl className="fact-list">
+              <div>
+                <dt>Load, last 7 days</dt>
+                <dd>{formatCompact(recentLoad.load)}</dd>
+              </div>
+              <div>
+                <dt>Climbing days</dt>
+                <dd>{recentLoad.climbingDays}</dd>
+              </div>
+              <div>
+                <dt>Last session</dt>
+                <dd>{sessions[0] ? formatLongDate(getSessionDayKey(sessions[0])) : "–"}</dd>
+              </div>
+              <div>
+                <dt>Max grade</dt>
+                <dd>{displayGradeLabel(settings.climberMaxGrade)}</dd>
+              </div>
+            </dl>
+          </article>
+
           <article className="panel full-width">
-            <div className="panel-header-row">
-              <h2>ACWR History</h2>
-              <select className="range-select" value={historyRange ?? "all"} onChange={(e) => {
-                const v = e.target.value;
-                if (v === "all") {
-                  setHistoryRange(null);
-                } else {
-                  setHistoryRange(Number(v) as 7 | 14 | 21 | 28 | 90);
-                }
-              }}>
-                <option value={7}>Last 7 days</option>
-                <option value={14}>Last 14 days</option>
-                <option value={21}>Last 21 days</option>
-                <option value={28}>Last 28 days</option>
-                <option value={90}>Last 90 days</option>
-                <option value="all">All time</option>
-              </select>
+            <div className="panel-heading">
+              <h2>ACWR over time</h2>
+              <p className="muted-hint">Acute ÷ chronic EWMA of your daily bouldering load. Hover or use the arrow keys for details.</p>
             </div>
             {sessionHistory.length < 2 ? (
-              <p>Log at least 2 sessions to see the history graph.</p>
+              <p className="empty-note">Log at least 2 sessions to see the history graph.</p>
             ) : (
               <AcwrHistoryChart
                 points={sessionHistory}
@@ -1849,36 +1676,17 @@ function App() {
             )}
           </article>
 
-          {/* Absolute load moving averages */}
           <article className="panel full-width">
-            <div className="panel-header-row">
-              <h2>Absolute Load Moving Averages</h2>
-              <select className="range-select" value={historyRange ?? "all"} onChange={(e) => {
-                const v = e.target.value;
-                if (v === "all") {
-                  setHistoryRange(null);
-                } else {
-                  setHistoryRange(Number(v) as 7 | 14 | 21 | 28 | 90);
-                }
-              }}>
-                <option value={7}>Last 7 days</option>
-                <option value={14}>Last 14 days</option>
-                <option value={28}>Last 28 days</option>
-                <option value={90}>Last 90 days</option>
-                <option value="all">All time</option>
-              </select>
+            <div className="panel-heading">
+              <h2>Rolling load totals</h2>
+              <p className="muted-hint">Total load over the previous 7, 14 and 28 days, for each day in the range.</p>
             </div>
-            <p className="muted-hint">Daily absolute load totals over the prior 7-, 14-, and 28-day windows.</p>
-            {sessionHistory.length < 2 ? (
-              <p>Log at least 2 sessions to see the moving-average graph.</p>
-            ) : (
-              <MovingAverageLoadChart points={sessionHistory} rangeDays={historyRange} />
-            )}
+            <LoadTotalsChart history={fullSessionHistory} rangeDays={historyRange} />
           </article>
 
           {/* Next-session planner */}
           <article className="panel full-width">
-            <h2>Next Session Planner</h2>
+            <h2>Plan your next session</h2>
             <p className="muted-hint">Enter your planned session details to see what ACWR you'll reach. Your ACWR target: <strong>{settings.model.acwr.targetAcwr.toFixed(2)}</strong>.</p>
             {plannerPrediction === null ? (
               <p>Log at least one session to enable the planner.</p>
@@ -1937,48 +1745,30 @@ function App() {
 
                 {plannerPrediction && Object.keys(gradeDistribution).length > 0 && (
                   <div className="grade-distribution">
-                    <h3>Alternative Grade Distributions</h3>
-                    <p>Same load ({plannerPrediction.actualLoad.toFixed(0)}), different grade mixes:</p>
-                    <svg width="100%" height="250" className="grade-dist-chart">
-                      {(() => {
-                        const sortedGrades = GRADES.filter((g) => gradeDistribution[g] && gradeDistribution[g] > 0).sort(
-                          (a, b) => gradeToNumber(a) - gradeToNumber(b)
-                        );
-                        if (sortedGrades.length === 0) return null;
-                        
-                        const maxCount = Math.max(...sortedGrades.map((g) => gradeDistribution[g]));
-                        const chartHeight = 200;
-                        const chartPadding = 20;
-                        const barWidth = Math.max(30, Math.floor((window.innerWidth - 60) / sortedGrades.length * 0.8));
-                        const barSpacing = Math.floor((window.innerWidth - 60) / sortedGrades.length);
-                        
-                        return sortedGrades.map((grade, idx) => {
-                          const count = gradeDistribution[grade];
-                          const barHeight = (count / maxCount) * chartHeight;
-                          const x = chartPadding + idx * barSpacing + (barSpacing - barWidth) / 2;
-                          const y = chartPadding + chartHeight - barHeight;
-                          
-                          return (
-                            <g key={grade}>
-                              <rect x={x} y={y} width={barWidth} height={barHeight} fill="#8b7355" opacity="0.7" rx="4" />
-                              <text x={x + barWidth / 2} y={y - 5} textAnchor="middle" fontSize="12" fontWeight="bold" fill="#fff">
-                                {count}
-                              </text>
-                              <text x={x + barWidth / 2} y={chartPadding + chartHeight + 20} textAnchor="middle" fontSize="11" fill="#000">
-                                {gradeToDisplay(grade, settings.gradeDisplayUnit)}
-                              </text>
-                            </g>
-                          );
-                        });
-                      })()}
-                    </svg>
+                    <h3>Same load, one grade</h3>
+                    <p className="muted-hint">How many boulders of a single grade give the same load ({plannerPrediction.actualLoad.toFixed(0)}).</p>
+                    {(() => {
+                      const grades = GRADES.filter((grade) => gradeDistribution[grade] > 0);
+                      return (
+                        <ColumnChart
+                          ariaLabel="Boulders needed per grade for the same load"
+                          labels={grades.map((grade) => gradeToDisplay(grade, settings.gradeDisplayUnit))}
+                          titles={grades.map((grade) => `Only ${gradeToDisplay(grade, settings.gradeDisplayUnit)}`)}
+                          values={grades.map((grade) => gradeDistribution[grade])}
+                          color="var(--series-1)"
+                          seriesLabel="boulders"
+                          height={210}
+                          formatValue={(value) => value.toFixed(0)}
+                        />
+                      );
+                    })()}
                   </div>
                 )}
 
                 {boulderDistribution.length > 0 && (
                   <div className="grade-distribution">
-                    <h3>Suggested Boulder Breakdown</h3>
-                    <p>Distribute your {plannerCount} boulders across grades to hit {plannerPrediction.actualLoad.toFixed(0)} load:</p>
+                    <h3>Suggested mix</h3>
+                    <p className="muted-hint">Distribute your {plannerCount} boulders across grades to hit {plannerPrediction.actualLoad.toFixed(0)} load:</p>
                     <div className="boulder-breakdown">
                       {boulderDistribution.map((item, idx) => (
                         <div key={idx} className="breakdown-item">
@@ -1994,11 +1784,7 @@ function App() {
           </article>
 
           <article className="panel full-width">
-            <h2>ACWR by Boulder Type</h2>
-            <p>
-              Acute window: {settings.model.acwr.acuteWindow} | Chronic window: {settings.model.acwr.chronicWindow}
-              {" "}| Goldilocks: {settings.model.acwr.lowThreshold.toFixed(2)} to {settings.model.acwr.highThreshold.toFixed(2)}
-            </p>
+            <h2>ACWR by hold type and wall angle</h2>
             {sessions.length > 0 && sessions.length < Math.max(...settings.model.ewmaWindows) && (
               <p className="bootstrap-warning">
                 ⚠ EWMA is still stabilising — using session average as seed ({sessions.length}/{Math.max(...settings.model.ewmaWindows)} sessions logged). Values will become more accurate as you log more sessions.
@@ -2006,6 +1792,7 @@ function App() {
             )}
             {acwrRows.length === 0 && <p>Save a session to generate ACWR values.</p>}
             {acwrRows.length > 0 && (
+              <div className="table-scroll">
               <table>
                 <thead>
                   <tr>
@@ -2019,15 +1806,18 @@ function App() {
                 <tbody>
                   {acwrRows.map((row) => (
                       <tr key={row.key}>
-                        <td>{row.key.replace("__", " + ")}</td>
-                        <td>{row.acute.toFixed(2)}</td>
-                        <td>{row.chronic.toFixed(2)}</td>
-                        <td>{row.acwr.toFixed(2)}</td>
-                        <td>{row.zone}</td>
+                        <td>{row.key.replace("__", " · ")}</td>
+                        <td className="num">{formatCompact(row.acute)}</td>
+                        <td className="num">{formatCompact(row.chronic)}</td>
+                        <td className="num">{row.acwr.toFixed(2)}</td>
+                        <td>
+                          <ZoneBadge acwr={row.acwr} low={settings.model.acwr.lowThreshold} high={settings.model.acwr.highThreshold} />
+                        </td>
                       </tr>
                     ))}
                 </tbody>
               </table>
+              </div>
             )}
           </article>
         </section>
@@ -2113,7 +1903,7 @@ function App() {
           </article>
 
           <article className="panel">
-            <h2>Model Tuning</h2>
+            <h2>Model tuning</h2>
             <div className="field-grid">
               <label>
                 Grade base points (V0)
@@ -2279,10 +2069,13 @@ function App() {
               </label>
             </div>
             <button type="button" className="danger" onClick={() => setSettings(DEFAULT_SETTINGS)}>
-              ↺ Revert All Settings To Default
+              Reset all settings to default
             </button>
 
-            <h3>Grade Intensity Conversion</h3>
+          </article>
+
+          <article className="panel">
+            <h2>Grade intensity</h2>
             <p>Shows relative difficulty: 1 V6 = X × V5 (depends on multiplier: {settings.model.gradeIntensity.multiplierPerGrade.toFixed(2)}).</p>
             <table className="grade-conversion-table">
               <thead>
@@ -2311,12 +2104,16 @@ function App() {
               </tbody>
             </table>
 
-            <h3>Data Export / Import</h3>
+          </article>
+
+          <article className="panel">
+            <h2>Data &amp; sync</h2>
+            <h3>Export / import</h3>
             <p>Download complete backup as JSON, or re-import to restore all data (same format as Google Drive).</p>
             <div className="metric-row">
-              <button type="button" onClick={exportBackupAsJSON}>⬇ Export Full Backup (JSON)</button>
+              <button type="button" onClick={exportBackupAsJSON}>Export backup (JSON)</button>
               <label className="file-import-label">
-                ⬆ Import Full Backup (JSON)
+                Import backup (JSON)
                 <input type="file" accept=".json" className="hidden-file-input" onChange={(e) => {
                   const file = e.target.files?.[0];
                   if (file) void importBackupFromJSON(file);
@@ -2325,13 +2122,13 @@ function App() {
               </label>
             </div>
             <details>
-              <summary>Legacy CSV Export (for reference)</summary>
+              <summary>Bouldering CSV (legacy)</summary>
               <div className="metric-row">
-                <button type="button" onClick={exportBouldersToCSV}>⬇ Export Bouldering CSV</button>
+                <button type="button" onClick={exportBouldersToCSV}>Export bouldering CSV</button>
               </div>
               <div className="import-row">
                 <label className="file-import-label">
-                  ⬆ Import Bouldering CSV
+                  Import bouldering CSV
                   <input type="file" accept=".csv" className="hidden-file-input" onChange={(e) => {
                     const file = e.target.files?.[0];
                     if (file) void importBouldersFromCSV(file);
@@ -2370,7 +2167,11 @@ function App() {
               </div>
             )}
 
-            <h3>ACWR Math Demo</h3>
+          </article>
+
+          <article className="panel full-width">
+            <h2>How the maths works</h2>
+            <h3>A worked example</h3>
             <p>
               Dummy session: {acwrExample.dummyProblems} problems, {acwrExample.dummyDuration} min, {" "}
               {acwrExample.dummySleep.toFixed(1)}h sleep.
@@ -2394,46 +2195,42 @@ function App() {
               {acwrExample.nextChronicEwma.toFixed(2)} = {acwrExample.nextAcwr.toFixed(2)}
             </p>
 
-            <h3>EWMA Weight Distribution</h3>
+            <h3>How much each day counts</h3>
             <p>Shows how much each day's load contributes to the EWMA calculation. Shorter windows (10d) weight recent days more heavily.</p>
             <EwmaWeightsChart />
 
-            <h3>Model Curves</h3>
+            <h3>Model curves</h3>
             <div className="curve-grid">
               <CurveChart
-                title="Grade Intensity Curve"
+                title="Grade intensity"
                 xLabel="Grade"
-                yLabel="Intensity"
                 points={gradeCurvePoints}
-                stroke="#0f7f88"
+                color="var(--series-1)"
                 xFormatter={(value) => gradeToDisplay(gradeFromNumber(value), settings.gradeDisplayUnit)}
-                yFormatter={(value) => value.toFixed(2)}
-                yLogarithmic
+                yFormatter={formatCompact}
+                yLog
               />
               <CurveChart
-                title="Speed Multiplier Curve"
+                title="Speed multiplier"
                 xLabel="Problems per hour"
-                yLabel="Speed multiplier"
                 points={speedCurvePoints}
-                stroke="#d97706"
+                color="var(--series-2)"
                 xFormatter={(value) => value.toFixed(0)}
                 yFormatter={(value) => `${value.toFixed(2)}x`}
               />
               <CurveChart
-                title="Sleep Penalty Curve"
+                title="Sleep penalty"
                 xLabel="Sleep deficit %"
-                yLabel="Penalty %"
                 points={sleepPenaltyCurvePoints}
-                stroke="#9f2a2a"
+                color="var(--series-3)"
                 xFormatter={(value) => `${value.toFixed(0)}%`}
                 yFormatter={(value) => `${value.toFixed(1)}%`}
               />
               <CurveChart
-                title="Stress Penalty Curve"
+                title="Stress penalty"
                 xLabel="Stress level (0-10)"
-                yLabel="Penalty %"
                 points={stressPenaltyCurvePoints}
-                stroke="#d97706"
+                color="var(--series-4)"
                 xFormatter={(value) => (value / 10).toFixed(1)}
                 yFormatter={(value) => `${value.toFixed(1)}%`}
               />
@@ -2442,21 +2239,21 @@ function App() {
             <div className="example-grid">
               <article className="math-card">
                 <h4>Grade harder (V6 to V9)</h4>
-                <p>Load changes to {acwrExample.hardGradeLoad.toFixed(2)}</p>
+                <p>Load changes to {formatCompact(acwrExample.hardGradeLoad)}</p>
                 <p>
                   ACWR: {acwrExample.hardGradeAcwr.toFixed(2)}
                 </p>
               </article>
               <article className="math-card">
                 <h4>Climb faster (120 to 75 min)</h4>
-                <p>Load changes to {acwrExample.fasterPaceLoad.toFixed(2)}</p>
+                <p>Load changes to {formatCompact(acwrExample.fasterPaceLoad)}</p>
                 <p>
                   ACWR: {acwrExample.fasterPaceAcwr.toFixed(2)}
                 </p>
               </article>
               <article className="math-card">
                 <h4>Sleep less (7.5h to 6.0h)</h4>
-                <p>Load changes to {acwrExample.poorSleepLoad.toFixed(2)}</p>
+                <p>Load changes to {formatCompact(acwrExample.poorSleepLoad)}</p>
                 <p>
                   ACWR: {acwrExample.poorSleepAcwr.toFixed(2)}
                 </p>
@@ -2469,14 +2266,13 @@ function App() {
       {tab === "history" && (
         <section className="panel-grid">
           <article className="panel full-width">
-            <h2>Bouldering History</h2>
+            <h2>Bouldering sessions</h2>
             {sessions.length === 0 && <p>No sessions saved yet.</p>}
             {sessions.length > 0 && (
               <table>
                 <thead>
                   <tr>
-                    <th>Entry Date</th>
-                    <th>Climbing Date</th>
+                    <th>Date</th>
                     <th>Problems</th>
                     <th>Grades</th>
                     <th>Duration</th>
@@ -2506,8 +2302,7 @@ function App() {
 
                     return (
                       <tr key={session.id}>
-                        <td>{new Date(session.createdAt).toLocaleString()}</td>
-                        <td>{climbingDateLabel}</td>
+                        <td className="nowrap">{climbingDateLabel === "-" ? formatLongDate(getSessionDayKey(session)) : climbingDateLabel}</td>
                         <td>{count}</td>
                         <td>{gradesLabel}</td>
                         <td>{session.durationMinutes} min</td>
@@ -2516,9 +2311,18 @@ function App() {
                         <td>{session.motivation}</td>
                         <td>
                           {session.source === "toplogger" ? (
-                            <span className="source-badge" title={session.locallyEdited ? "Edited after sync" : "Synced from TopLogger"}>
-                              TopLogger{session.locallyEdited ? " ✎" : ""}
-                            </span>
+                            <>
+                              <span className="source-badge" title={session.locallyEdited ? "Edited after sync" : "Synced from TopLogger"}>
+                                TopLogger{session.locallyEdited ? " ✎" : ""}
+                              </span>
+                              {session.toplogger && (
+                                <span className="source-stats">
+                                  {session.toplogger.climbsTried} tried · {session.toplogger.climbsSent} sent ·{" "}
+                                  {session.toplogger.totalTries ?? session.toplogger.loggedTries} tries
+                                  {session.toplogger.gymName ? ` · ${session.toplogger.gymName}` : ""}
+                                </span>
+                              )}
+                            </>
                           ) : (
                             "Manual"
                           )}
@@ -2537,7 +2341,7 @@ function App() {
           </article>
 
           <article className="panel full-width">
-            <h2>Strength History</h2>
+            <h2>Strength days</h2>
             <StrengthHistoryTable settings={settings} strengthSets={strengthSets} />
           </article>
         </section>

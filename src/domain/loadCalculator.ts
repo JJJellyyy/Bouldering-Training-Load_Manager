@@ -353,6 +353,15 @@ export function getAcwrZone(acwr: number, lowThreshold: number, highThreshold: n
   return "Goldilocks";
 }
 
+export type AcwrZoneKey = "detraining" | "goldilocks" | "high-risk";
+
+/** Stable key for styling and copy, derived from getAcwrZone. */
+export function getAcwrZoneKey(acwr: number, lowThreshold: number, highThreshold: number): AcwrZoneKey {
+  if (acwr < lowThreshold) return "detraining";
+  if (acwr > highThreshold) return "high-risk";
+  return "goldilocks";
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }

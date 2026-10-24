@@ -52,7 +52,7 @@ export type EWMADays = 10 | 15 | 20 | 25;
 export type GradeDisplayUnit = "v" | "font";
 export type SessionSource = "manual" | "toplogger";
 export type StrengthLoadMetric = "relative" | "volume" | "sets";
-export type TopLoggerCountMode = "attempted" | "sent";
+export type TopLoggerCountMode = "attempted" | "sent" | "tries";
 
 export interface ProblemEntry {
   id: string;
@@ -76,6 +76,18 @@ export interface SessionInput {
   externalId?: string;
   /** Set when a synced session was edited by hand, so later syncs leave it alone. */
   locallyEdited?: boolean;
+  /** What TopLogger recorded for this day, kept so synced sessions can be checked against the app. */
+  toplogger?: TopLoggerSessionStats;
+}
+
+export interface TopLoggerSessionStats {
+  gymName?: string;
+  climbsTried: number;
+  climbsSent: number;
+  /** Tries counted from individual logs. */
+  loggedTries: number;
+  /** TopLogger's own total for the day (bouldersTotalTries). */
+  totalTries?: number;
 }
 
 export interface BoulderTypeLoad {

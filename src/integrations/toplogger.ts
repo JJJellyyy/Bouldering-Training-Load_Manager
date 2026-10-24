@@ -19,6 +19,8 @@ export interface TopLoggerClimb {
   climbId: string;
   grade: number;
   ticked: boolean;
+  /** Number of logs (tries) on this climb that day. */
+  tries: number;
   wallName?: string;
 }
 
@@ -27,6 +29,7 @@ export interface TopLoggerClimbDay {
   date: string;
   gymName?: string;
   climbs: TopLoggerClimb[];
+  totalTries?: number;
 }
 
 interface TokenPair {
@@ -163,6 +166,7 @@ interface ClimbDayRow {
   statsAtDate: string;
   gymId: string | null;
   gym: { name: string } | null;
+  bouldersTotalTries: number | null;
 }
 
 interface ClimbLogRow {
@@ -204,7 +208,7 @@ export async function fetchTopLoggerBoulderDays(
           updateDayStatsIfOld: true
         ) {
           pagination { total }
-          data { id statsAtDate gymId gym { name } }
+          data { id statsAtDate gymId bouldersTotalTries gym { name } }
         }
       }`,
       {
@@ -256,11 +260,13 @@ export async function fetchTopLoggerBoulderDays(
       const existing = climbs.get(climbId);
       if (existing) {
         existing.ticked ||= log.ticked;
+        existing.tries += 1;
       } else {
         climbs.set(climbId, {
           climbId,
           grade: log.climb?.grade ?? 0,
           ticked: log.ticked,
+          tries: 1,
           wallName: log.climb?.wall?.nameLoc ?? undefined,
         });
       }
@@ -271,6 +277,7 @@ export async function fetchTopLoggerBoulderDays(
       date: toLocalIsoDate(day.statsAtDate),
       gymName: day.gym?.name,
       climbs: Array.from(climbs.values()),
+      totalTries: day.bouldersTotalTries ?? undefined,
     });
   }
 
@@ -311,6 +318,7 @@ export function topLoggerDayToSession(day: TopLoggerClimbDay, settings: AppSetti
 
   for (const climb of day.climbs) {
     if (settings.toplogger.countMode === "sent" && !climb.ticked) continue;
+    const weight = settings.toplogger.countMode === "tries" ? climb.tries : 1;
     const grade = topLoggerGradeToV(climb.grade);
     if (!grade) continue;
 
@@ -318,11 +326,11 @@ export function topLoggerDayToSession(day: TopLoggerClimbDay, settings: AppSetti
     const key = `${grade}|${wallAngle}`;
     const existing = grouped.get(key);
     if (existing) {
-      existing.count += 1;
+      existing.count += weight;
     } else {
       grouped.set(key, {
         id: `toplogger-${day.id}-${key}`,
-        count: 1,
+        count: weight,
         grade,
         holdType: "mixed",
         wallAngle,
@@ -343,5 +351,12 @@ export function topLoggerDayToSession(day: TopLoggerClimbDay, settings: AppSetti
     problems: Array.from(grouped.values()),
     source: "toplogger",
     externalId: day.id,
+    toplogger: {
+      gymName: day.gymName,
+      climbsTried: day.climbs.length,
+      climbsSent: day.climbs.filter((climb) => climb.ticked).length,
+      loggedTries: day.climbs.reduce((sum, climb) => sum + climb.tries, 0),
+      totalTries: day.totalTries,
+    },
   };
 }

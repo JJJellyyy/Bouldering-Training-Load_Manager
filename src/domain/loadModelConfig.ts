@@ -155,7 +155,9 @@ export function clampSettings(input: AppSettings): AppSettings {
   next.strength.acuteWindow = clamp(Math.round(next.strength.acuteWindow), 3, 60);
   next.strength.chronicWindow = clamp(Math.round(next.strength.chronicWindow), 3, 90);
 
-  next.toplogger.countMode = next.toplogger.countMode === "sent" ? "sent" : "attempted";
+  if (!["attempted", "sent", "tries"].includes(next.toplogger.countMode)) {
+    next.toplogger.countMode = DEFAULT_SETTINGS.toplogger.countMode;
+  }
   next.toplogger.defaultDurationMinutes = clamp(Math.round(next.toplogger.defaultDurationMinutes), 10, 600);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(next.toplogger.importFromDate)) {
     next.toplogger.importFromDate = DEFAULT_SETTINGS.toplogger.importFromDate;
