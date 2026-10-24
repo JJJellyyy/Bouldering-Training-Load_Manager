@@ -1,15 +1,10 @@
-import type {
-  AppSettings,
-  BoulderTypeLoad,
-  CalculationResult,
-  Grade,
-  GradeDisplayUnit,
-  HoldType,
-  SessionInput,
-  WallAngle,
-} from "../types";
+import type { AppSettings, CalculationResult, Grade, GradeDisplayUnit, SessionInput } from "../types";
 import { GRADES } from "../types";
 import { FONT_BY_GRADE } from "../types";
+import { addDays, buildAcwrHistory, fillDailyLoads, todayIsoDate, type HistoryPoint } from "./acwr";
+
+export type { HistoryPoint } from "./acwr";
+
 const GRADES_ORDER = [
   "V0",
   "V1",
@@ -56,14 +51,17 @@ const FONT_TO_V: Record<string, Grade | string> = {
   "9A": "V17",
 };
 
+/** Look-back window for the reference ("current max") grade. */
+const REFERENCE_WINDOW_DAYS = 365;
+
 export function gradeToNumber(grade: Grade | string): number {
   const gradeStr = String(grade).replace("V", "");
   return parseFloat(gradeStr);
 }
 
-export function gradeToPoints(grade: Grade, settings: AppSettings): number {
-  const gradeNumber = gradeToNumber(grade);
-  return settings.model.gradeIntensity.basePoints * Math.pow(settings.model.gradeIntensity.multiplierPerGrade, gradeNumber);
+export function gradeFromNumber(value: number): Grade {
+  const bounded = Math.min(17, Math.max(0, Math.round(value)));
+  return `V${bounded}` as Grade;
 }
 
 export function gradeToDisplay(grade: Grade, unit: GradeDisplayUnit): string {
@@ -82,159 +80,27 @@ export function displayToGrade(display: string, unit: GradeDisplayUnit): string 
   return FONT_TO_V[display.toUpperCase()];
 }
 
-export function calculateGradeIntensity(problemGrade: Grade, settings: AppSettings): number {
-  return gradeToPoints(problemGrade, settings);
+/**
+ * Points for one problem, relative to the climber's reference (max) grade:
+ * basePoints at the reference grade, × multiplierPerGrade for each grade above, ÷ for each grade below.
+ * So a V5 is "hard" while V5 is your limit and counts for less once you climb V8.
+ */
+export function calculateGradeIntensity(problemGrade: Grade, referenceGrade: Grade, settings: AppSettings): number {
+  const { basePoints, multiplierPerGrade } = settings.model.gradeIntensity;
+  return basePoints * multiplierPerGrade ** (gradeToNumber(problemGrade) - gradeToNumber(referenceGrade));
 }
 
 export function calculateSpeedMultiplier(totalProblems: number, durationMinutes: number, settings: AppSettings): number {
-  // Linear speed penalty: 10 min/boulder = 0% impact, 1 min/boulder = 100% impact
+  // Linear pace bonus: 10 min/boulder = no extra load, 1 min/boulder = +impactPercent.
   const safeProblems = Math.max(1, totalProblems);
   const safeDuration = Math.max(1, durationMinutes);
   const minutesPerBoulder = safeDuration / safeProblems;
 
   if (minutesPerBoulder >= 10) return 1;
   if (minutesPerBoulder <= 1) return 1 + settings.model.speed.impactPercent / 100;
-  
-  // Linear interpolation: 10 min = 1x, 1 min = 1 + impactPercent%
-  const deficit = (10 - minutesPerBoulder) / 9; // 0 at 10 min, 1 at 1 min
+
+  const deficit = (10 - minutesPerBoulder) / 9;
   return 1 + (settings.model.speed.impactPercent / 100) * deficit;
-}
-
-export function calculateSleepRecoveryMultiplier(actualSleepHours: number, settings: AppSettings): number {
-  // Linear sleep penalty: personalMaxSleep = 0% impact, 0 hours = 100% impact
-  const personalMax = Math.max(0.1, settings.model.recovery.personalMaxSleepHours);
-  const deficit = clamp((personalMax - actualSleepHours) / personalMax, 0, 1);
-  return 1 + (settings.model.recovery.sleepImpactPercent / 100) * deficit;
-}
-
-export function calculateStressMultiplier(stressLevel: number, settings: AppSettings): number {
-  // Linear stress penalty: 0 stress = 0% impact, 10 stress = 100% impact
-  const deficit = clamp(stressLevel / 10, 0, 1);
-  return 1 + (settings.model.recovery.stressImpactPercent / 100) * deficit;
-}
-
-function getBoulderKey(holdType: HoldType, wallAngle: WallAngle): string {
-  return `${holdType}__${wallAngle}`;
-}
-
-function expandWallAngles(wallAngle: WallAngle): WallAngle[] {
-  if (wallAngle === "mixed") {
-    return ["slab", "vert", "overhang", "roof"];
-  }
-
-  return [wallAngle];
-}
-
-export function calculateSessionLoad(session: SessionInput, settings: AppSettings): CalculationResult {
-  const totalProblems = session.problems.reduce((sum, item) => sum + item.count, 0);
-  const speedMultiplier = calculateSpeedMultiplier(totalProblems, session.durationMinutes, settings);
-  const recoveryMultiplier = calculateSleepRecoveryMultiplier(session.sleepHours, settings);
-  const grouped = new Map<string, BoulderTypeLoad>();
-
-  for (const problem of session.problems) {
-    const gradeIntensity = calculateGradeIntensity(problem.grade, settings);
-    const targetAngles = expandWallAngles(problem.wallAngle);
-    const splitCount = problem.count / targetAngles.length;
-
-    for (const angle of targetAngles) {
-      const key = getBoulderKey(problem.holdType, angle);
-      const rawContribution = splitCount * gradeIntensity;
-      const existing = grouped.get(key);
-
-      if (existing) {
-        existing.rawLoad += rawContribution;
-        existing.adjustedLoad = existing.rawLoad * speedMultiplier * recoveryMultiplier;
-      } else {
-        grouped.set(key, {
-          key,
-          holdType: problem.holdType,
-          wallAngle: angle,
-          rawLoad: rawContribution,
-          adjustedLoad: rawContribution * speedMultiplier * recoveryMultiplier,
-        });
-      }
-    }
-  }
-
-  const byBoulderType = Array.from(grouped.values());
-
-  const totalLoad = byBoulderType.reduce((sum, item) => sum + item.adjustedLoad, 0);
-
-  return {
-    totalLoad,
-    speedMultiplier,
-    recoveryMultiplier,
-    byBoulderType,
-  };
-}
-
-/**
- * Given current EWMA state and a target ACWR, compute what session load is needed.
- * Formula: newAcute = α * load + (1-α) * prevAcute = targetAcwr * prevChronic
- * → load = (targetAcwr * prevChronic - (1-α) * prevAcute) / α
- */
-export function solveTargetLoad(
-  prevAcute: number,
-  prevChronic: number,
-  targetAcwr: number,
-  acuteWindow: number,
-): number {
-  const alpha = 2 / (acuteWindow + 1);
-  const required = (targetAcwr * prevChronic - (1 - alpha) * prevAcute) / alpha;
-  return Math.max(0, required);
-}
-
-/**
- * Simple session-load estimator for a uniform set of problems.
- * Used by the planner solver.
- */
-export function estimateSimpleLoad(
-  count: number,
-  durationMinutes: number,
-  grade: Grade,
-  sleepHours: number,
-  stressLevel: number,
-  settings: AppSettings,
-): number {
-  const gradeIntensity = calculateGradeIntensity(grade, settings);
-  const speed = calculateSpeedMultiplier(count, durationMinutes, settings);
-  const recovery = calculateSleepRecoveryMultiplier(sleepHours, settings);
-  const stress = calculateStressMultiplier(stressLevel, settings);
-  return count * gradeIntensity * speed * recovery * stress;
-}
-
-export function calculateGradeDistribution(
-  targetLoad: number,
-  durationMinutes: number,
-  sleepHours: number,
-  stressLevel: number,
-  settings: AppSettings,
-): Record<string, number> {
-  const speed = calculateSpeedMultiplier(1, durationMinutes, settings);
-  const recovery = calculateSleepRecoveryMultiplier(sleepHours, settings);
-  const stress = calculateStressMultiplier(stressLevel, settings);
-  const speedRecoveryStress = speed * recovery * stress;
-
-  const distribution: Record<string, number> = {};
-  for (const grade of GRADES) {
-    const gradeIntensity = calculateGradeIntensity(grade, settings);
-    const countForGrade = targetLoad / (gradeIntensity * speedRecoveryStress);
-    distribution[grade] = Math.round(countForGrade);
-  }
-  return distribution;
-}
-
-export interface HistoryPoint {
-  date: string;
-  load: number;
-  acute: number;
-  chronic: number;
-  acwr: number;
-}
-
-export interface MovingAveragePoint {
-  date: string;
-  average: number;
 }
 
 export function getSessionDayKey(session: SessionInput): string {
@@ -253,66 +119,108 @@ export function getSessionDayKey(session: SessionInput): string {
     return parsed.toISOString().slice(0, 10);
   }
 
-  return new Date().toISOString().slice(0, 10);
+  return todayIsoDate();
 }
 
 /**
- * Build a time-ordered list of EWMA/ACWR values from raw sessions.
- * Returns all sessions computed from scratch (full history needed for accurate EWMA),
- * filtered to the last `daysBack` days for display.
+ * The climber's current max grade on a given day: the hardest grade logged on at least two different days
+ * in the preceding year (one-off attempts on a hard project don't count), falling back to the hardest grade
+ * logged at all in that year, and finally to the max grade from settings.
+ */
+export function referenceGradeOn(dayKey: string, sessions: SessionInput[], settings: AppSettings): Grade {
+  const windowStart = addDays(dayKey, -REFERENCE_WINDOW_DAYS);
+  const daysByGrade = new Map<number, Set<string>>();
+
+  for (const session of sessions) {
+    const sessionDay = getSessionDayKey(session);
+    if (sessionDay > dayKey || sessionDay <= windowStart) continue;
+    for (const problem of session.problems) {
+      if (problem.count <= 0) continue;
+      const grade = gradeToNumber(problem.grade);
+      const days = daysByGrade.get(grade) ?? new Set<string>();
+      days.add(sessionDay);
+      daysByGrade.set(grade, days);
+    }
+  }
+
+  if (daysByGrade.size === 0) return settings.climberMaxGrade;
+
+  const grades = [...daysByGrade.keys()].sort((a, b) => b - a);
+  const repeated = grades.find((grade) => (daysByGrade.get(grade)?.size ?? 0) >= 2);
+  return gradeFromNumber(repeated ?? grades[0]);
+}
+
+/** Session load = Σ problems × grade intensity (vs. reference grade) × pace multiplier. Sleep and stress are not load. */
+export function calculateSessionLoad(session: SessionInput, referenceGrade: Grade, settings: AppSettings): CalculationResult {
+  const totalProblems = session.problems.reduce((sum, item) => sum + item.count, 0);
+  const speedMultiplier = calculateSpeedMultiplier(totalProblems, session.durationMinutes, settings);
+  const rawLoad = session.problems.reduce(
+    (sum, problem) => sum + problem.count * calculateGradeIntensity(problem.grade, referenceGrade, settings),
+    0,
+  );
+
+  return {
+    totalLoad: rawLoad * speedMultiplier,
+    speedMultiplier,
+    referenceGrade,
+  };
+}
+
+/** Problems of one grade that add up to `targetLoad`, for every grade. */
+export function calculateGradeDistribution(
+  targetLoad: number,
+  speedMultiplier: number,
+  referenceGrade: Grade,
+  settings: AppSettings,
+): Record<string, number> {
+  const distribution: Record<string, number> = {};
+  for (const grade of GRADES) {
+    const intensity = calculateGradeIntensity(grade, referenceGrade, settings);
+    distribution[grade] = Math.round(targetLoad / (intensity * speedMultiplier));
+  }
+  return distribution;
+}
+
+/** Daily bouldering load from the first session through `endDate` (default: today), rest days included. */
+export function buildDailyLoads(sessions: SessionInput[], settings: AppSettings, endDate: string = todayIsoDate()) {
+  const loadsByDate = new Map<string, number>();
+  const referenceByDay = new Map<string, Grade>();
+
+  for (const session of sessions) {
+    const dayKey = getSessionDayKey(session);
+    let reference = referenceByDay.get(dayKey);
+    if (!reference) {
+      reference = referenceGradeOn(dayKey, sessions, settings);
+      referenceByDay.set(dayKey, reference);
+    }
+    const load = calculateSessionLoad(session, reference, settings).totalLoad;
+    loadsByDate.set(dayKey, (loadsByDate.get(dayKey) ?? 0) + load);
+  }
+
+  return fillDailyLoads(loadsByDate, endDate);
+}
+
+/**
+ * Daily EWMA/ACWR history for all bouldering, through today so the ratio keeps decaying on rest days.
+ * Computed over the full history (needed for accurate EWMA), then cut to the last `daysBack` days.
  */
 export function buildSessionHistory(
   sessions: SessionInput[],
   settings: AppSettings,
   daysBack: number | null,
 ): HistoryPoint[] {
-  if (sessions.length === 0) return [];
-
-  const sorted = [...sessions].sort(
-    (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+  const history = buildAcwrHistory(
+    buildDailyLoads(sessions, settings),
+    settings.model.acwr.acuteWindow,
+    settings.model.acwr.chronicWindow,
   );
 
-  const acuteWindow = settings.model.acwr.acuteWindow;
-  const chronicWindow = settings.model.acwr.chronicWindow;
-  const acuteAlpha = 2 / (acuteWindow + 1);
-  const chronicAlpha = 2 / (chronicWindow + 1);
+  return daysBack === null ? history : history.slice(-daysBack);
+}
 
-  const sessionsByDate = new Map<string, SessionInput[]>();
-  for (const session of sorted) {
-    const dayKey = getSessionDayKey(session);
-    const existing = sessionsByDate.get(dayKey) ?? [];
-    existing.push(session);
-    sessionsByDate.set(dayKey, existing);
-  }
-
-  const startDate = new Date(sorted[0].createdAt);
-  startDate.setUTCHours(0, 0, 0, 0);
-  const endDate = new Date(sorted[sorted.length - 1].createdAt);
-  endDate.setUTCHours(0, 0, 0, 0);
-
-  let acute = 0;
-  let chronic = 0;
-  const all: HistoryPoint[] = [];
-  const currentDate = new Date(startDate);
-
-  while (currentDate <= endDate) {
-    const dayKey = currentDate.toISOString().slice(0, 10);
-    const daySessions = sessionsByDate.get(dayKey) ?? [];
-    const load = daySessions.reduce((sum, session) => sum + calculateSessionLoad(session, settings).totalLoad, 0);
-
-    acute = acuteAlpha * load + (1 - acuteAlpha) * acute;
-    chronic = chronicAlpha * load + (1 - chronicAlpha) * chronic;
-    const acwr = chronic > 0 ? acute / chronic : 0;
-
-    all.push({ date: dayKey, load, acute, chronic, acwr });
-    currentDate.setUTCDate(currentDate.getUTCDate() + 1);
-  }
-
-  if (daysBack === null) return all;
-
-  const cutoffMs = Date.now() - daysBack * 24 * 60 * 60 * 1000;
-  const cutoffDate = new Date(cutoffMs).toISOString().slice(0, 10);
-  return all.filter((point) => point.date >= cutoffDate);
+export interface MovingAveragePoint {
+  date: string;
+  average: number;
 }
 
 export function buildMovingAverageSeries(history: HistoryPoint[], windowDays: number): MovingAveragePoint[] {
@@ -341,27 +249,58 @@ export function suggestedCapacityRange(climberMaxGrade: Grade): { min: number; m
   return { min, max };
 }
 
-export function getAcwrZone(acwr: number, lowThreshold: number, highThreshold: number): string {
-  if (acwr < lowThreshold) {
-    return "Detraining";
-  }
-
-  if (acwr > highThreshold) {
-    return "High Risk";
-  }
-
-  return "Goldilocks";
-}
-
 export type AcwrZoneKey = "detraining" | "goldilocks" | "high-risk";
 
-/** Stable key for styling and copy, derived from getAcwrZone. */
+/** Stable key for styling and copy. */
 export function getAcwrZoneKey(acwr: number, lowThreshold: number, highThreshold: number): AcwrZoneKey {
   if (acwr < lowThreshold) return "detraining";
   if (acwr > highThreshold) return "high-risk";
   return "goldilocks";
 }
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
+export interface Readiness {
+  level: "good" | "fair" | "low";
+  reasons: string[];
+}
+
+/**
+ * Readiness from sleep and stress. Kept separate from load: a bad night doesn't make a session bigger,
+ * it makes you less ready for one.
+ */
+export function assessReadiness(
+  sleepHours: number,
+  sleepQuality: number | undefined,
+  stress: number,
+  settings: AppSettings,
+): Readiness {
+  const reasons: string[] = [];
+  let penalty = 0;
+
+  const sleepDeficit = settings.model.recovery.personalMaxSleepHours - sleepHours;
+  if (sleepDeficit >= 2) {
+    penalty += 2;
+    reasons.push(`${sleepDeficit.toFixed(1)} h short on sleep`);
+  } else if (sleepDeficit >= 1) {
+    penalty += 1;
+    reasons.push(`${sleepDeficit.toFixed(1)} h short on sleep`);
+  }
+
+  if (sleepQuality !== undefined && sleepQuality <= 3) {
+    penalty += 2;
+    reasons.push("poor sleep quality");
+  } else if (sleepQuality !== undefined && sleepQuality <= 5) {
+    penalty += 1;
+    reasons.push("so-so sleep quality");
+  }
+
+  const stressShare = stress / Math.max(1, settings.stressScaleMax);
+  if (stressShare >= 0.8) {
+    penalty += 2;
+    reasons.push("high stress");
+  } else if (stressShare >= 0.6) {
+    penalty += 1;
+    reasons.push("elevated stress");
+  }
+
+  return { level: penalty >= 3 ? "low" : penalty >= 1 ? "fair" : "good", reasons };
 }

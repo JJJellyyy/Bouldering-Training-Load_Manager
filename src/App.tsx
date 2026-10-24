@@ -1,34 +1,34 @@
 import { useEffect, useMemo, useState } from "react";
 import "./App.css";
 import {
-  clearEwmaSnapshots,
   clearSessions,
-  loadEwmaSnapshots,
   loadSessions,
   loadSettings,
   loadStrengthSets,
   replaceStrengthSets,
-  saveEwmaSnapshot,
   saveSession,
   saveSettings,
 } from "./db/indexedDb";
-import { updateSnapshot } from "./domain/ewma";
+import { addDays, calculateTrendMetrics, isCalibrating, predictAcwr, todayIsoDate } from "./domain/acwr";
 import { DEFAULT_SETTINGS, clampSettings } from "./domain/loadModelConfig";
 import {
+  assessReadiness,
   calculateGradeIntensity,
-  calculateSleepRecoveryMultiplier,
-  calculateStressMultiplier,
   calculateSpeedMultiplier,
   calculateSessionLoad,
   calculateGradeDistribution,
+  gradeFromNumber,
   gradeToDisplay,
   gradeToNumber,
+  referenceGradeOn,
   suggestedCapacityRange,
   buildSessionHistory,
-  getAcwrZone,
   getAcwrZoneKey,
   getSessionDayKey,
+  type Readiness,
 } from "./domain/loadCalculator";
+import { buildWeeklyWellness } from "./domain/wellness";
+import { WellnessCharts } from "./components/WellnessCharts";
 import { AcwrHistoryChart } from "./components/AcwrHistoryChart";
 import { BrandMark, RangePills, TabIcon, ThemeToggle } from "./components/Chrome";
 import { ColumnChart } from "./components/charts/ColumnChart";
@@ -66,7 +66,6 @@ import {
   WALL_ANGLES,
   type AppSettings,
   type DriveBackupPayload,
-  type EWMASnapshot,
   type Grade,
   type GradeDisplayUnit,
   type HoldType,
@@ -82,6 +81,7 @@ interface SessionDraft {
   sessionDate: string;
   durationMinutes: number;
   sleepHours: number;
+  sleepQuality: number;
   stress: number;
   motivation: number;
   problems: ProblemEntry[];
@@ -92,6 +92,7 @@ function createSessionDraft(settings: AppSettings): SessionDraft {
     sessionDate: todayIsoDate(),
     durationMinutes: 120,
     sleepHours: settings.model.recovery.personalMaxSleepHours,
+    sleepQuality: 7,
     stress: 5,
     motivation: 5,
     problems: [],
@@ -106,69 +107,15 @@ function getId(): string {
   return `${Date.now()}-${Math.round(Math.random() * 100_000)}`;
 }
 
-function todayIsoDate(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function shiftIsoDate(isoDate: string, days: number): string {
-  const date = new Date(`${isoDate}T00:00:00Z`);
-  date.setUTCDate(date.getUTCDate() + days);
-  return date.toISOString().slice(0, 10);
-}
-
 const GOOGLE_SESSION_STORAGE_KEY = "blm_google_session";
 
-function getEwmaValue(snapshot: EWMASnapshot, windowDays: number): number {
-  // For preset windows, return exact values
-  if (windowDays === 10) {
-    return snapshot.ewma10;
-  }
-  if (windowDays === 15) {
-    return snapshot.ewma15;
-  }
-  if (windowDays === 20) {
-    return snapshot.ewma20;
-  }
-  if (windowDays === 25) {
-    return snapshot.ewma25;
-  }
-
-  // For custom windows, interpolate between nearest two preset windows
-  const presets = [10, 15, 20, 25];
-  const presetValues = [snapshot.ewma10, snapshot.ewma15, snapshot.ewma20, snapshot.ewma25];
-  
-  if (windowDays < 10) {
-    // Extrapolate below 10
-    const ratio = windowDays / 10;
-    return snapshot.ewma10 * ratio;
-  }
-  if (windowDays > 25) {
-    // Extrapolate above 25
-    const ratio = windowDays / 25;
-    return snapshot.ewma25 * ratio;
-  }
-
-  // Find bracketing windows
-  let below = presets[0];
-  let above = presets[presets.length - 1];
-  let belowIdx = 0;
-  let aboveIdx = presets.length - 1;
-
-  for (let i = 0; i < presets.length - 1; i++) {
-    if (presets[i] <= windowDays && windowDays <= presets[i + 1]) {
-      below = presets[i];
-      above = presets[i + 1];
-      belowIdx = i;
-      aboveIdx = i + 1;
-      break;
-    }
-  }
-
-  // Linear interpolation
-  const belowValue = presetValues[belowIdx];
-  const aboveValue = presetValues[aboveIdx];
-  const t = (windowDays - below) / (above - below);
-  return belowValue + t * (aboveValue - belowValue);
+function ReadinessNote({ readiness, label }: { readiness: Readiness; label: string }) {
+  return (
+    <p className={`readiness-note ${readiness.level}`}>
+      <span className="readiness-label">{label}</span>
+      {readiness.reasons.length === 0 ? "Well rested and low stress." : `${readiness.reasons.join(", ")}. Consider the lower end of your plan.`}
+    </p>
+  );
 }
 
 function App() {
@@ -183,7 +130,6 @@ function App() {
   const [toploggerAuth, setToploggerAuth] = useState<TopLoggerAuth | undefined>(() => readTopLoggerAuth());
   const [toploggerStatus, setToploggerStatus] = useState<string | undefined>();
   const [toploggerSyncing, setToploggerSyncing] = useState(false);
-  const [ewmaSnapshots, setEwmaSnapshots] = useState<Record<string, EWMASnapshot>>({});
   const [draft, setDraft] = useState<SessionDraft>(createSessionDraft(DEFAULT_SETTINGS));
   const [editingSessionId, setEditingSessionId] = useState<string | undefined>();
   const [editingSessionCreatedAt, setEditingSessionCreatedAt] = useState<string | undefined>();
@@ -202,6 +148,7 @@ function App() {
   const [plannerDuration, setPlannerDuration] = useState<number>(120);
   const [plannerDate, setPlannerDate] = useState<string>(todayIsoDate());
   const [plannerSleep, setPlannerSleep] = useState<number>(8);
+  const [plannerSleepQuality, setPlannerSleepQuality] = useState<number>(7);
   const [plannerStress, setPlannerStress] = useState<number>(5);
 
   function setTabAndPersist(t: TabName): void {
@@ -263,144 +210,100 @@ function App() {
     [draft.problems],
   );
 
+  // The max grade loads are measured against today; earlier days use the max at that time.
+  const currentReferenceGrade = useMemo(
+    () => referenceGradeOn(todayIsoDate(), sessions, settings),
+    [sessions, settings],
+  );
+
   const estimatedLoad = useMemo(() => {
     if (draft.problems.length === 0) {
       return undefined;
     }
 
-    return calculateSessionLoad(
-      {
-        id: "draft",
-        createdAt: new Date().toISOString(),
-        durationMinutes: draft.durationMinutes,
-        sleepHours: draft.sleepHours,
-        stress: draft.stress,
-        motivation: draft.motivation,
-        problems: draft.problems,
-      },
-      settings,
-    );
-  }, [draft, settings]);
+    const draftSession: SessionInput = {
+      id: "draft",
+      createdAt: `${draft.sessionDate}T12:00:00Z`,
+      durationMinutes: draft.durationMinutes,
+      sleepHours: draft.sleepHours,
+      sleepQuality: draft.sleepQuality,
+      stress: draft.stress,
+      motivation: draft.motivation,
+      problems: draft.problems,
+    };
+    const otherSessions = sessions.filter((item) => item.id !== editingSessionId);
+    const reference = referenceGradeOn(draft.sessionDate, [...otherSessions, draftSession], settings);
+    return calculateSessionLoad(draftSession, reference, settings);
+  }, [draft, sessions, settings, editingSessionId]);
 
-  const capacityRange = useMemo(
-    () => suggestedCapacityRange(settings.climberMaxGrade),
-    [settings.climberMaxGrade],
+  const draftReadiness = useMemo(
+    () => assessReadiness(draft.sleepHours, draft.sleepQuality, draft.stress, settings),
+    [draft.sleepHours, draft.sleepQuality, draft.stress, settings],
   );
 
-  const acwrRows = useMemo(() => {
-    const acuteWindow = settings.model.acwr.acuteWindow;
-    const chronicWindow = settings.model.acwr.chronicWindow;
+  const capacityRange = useMemo(() => suggestedCapacityRange(currentReferenceGrade), [currentReferenceGrade]);
 
-    return Object.values(ewmaSnapshots)
-      .map((snapshot) => {
-        const acute = getEwmaValue(snapshot, acuteWindow);
-        const chronic = getEwmaValue(snapshot, chronicWindow);
-        const acwr = chronic <= 0 ? 0 : acute / chronic;
-
-        return {
-          key: snapshot.key,
-          acute,
-          chronic,
-          acwr,
-          zone: getAcwrZone(acwr, settings.model.acwr.lowThreshold, settings.model.acwr.highThreshold),
-        };
-      })
-      .sort((a, b) => b.acwr - a.acwr);
-  }, [ewmaSnapshots, settings.model.acwr]);
-
-  // Overall ACWR: sum all acute / sum all chronic across every boulder type snapshot
-  const overallAcwr = useMemo(() => {
-    const snapshots = Object.values(ewmaSnapshots);
-    if (snapshots.length === 0) return null;
-    const sumAcute = snapshots.reduce((s, snap) => s + getEwmaValue(snap, settings.model.acwr.acuteWindow), 0);
-    const sumChronic = snapshots.reduce((s, snap) => s + getEwmaValue(snap, settings.model.acwr.chronicWindow), 0);
-    return sumChronic > 0 ? sumAcute / sumChronic : null;
-  }, [ewmaSnapshots, settings.model.acwr]);
-
-  // Session history for ACWR+Load graph (combined across all types)
+  // One ACWR over all bouldering, running through today so it decays on rest days.
   const fullSessionHistory = useMemo(() => buildSessionHistory(sessions, settings, null), [sessions, settings]);
+  const sessionHistory = useMemo(
+    () => (historyRange === null ? fullSessionHistory : fullSessionHistory.slice(-historyRange)),
+    [fullSessionHistory, historyRange],
+  );
+  const overallAcwr = sessions.length === 0 || fullSessionHistory.length === 0 ? null : fullSessionHistory[fullSessionHistory.length - 1].acwr;
+  const acwrCalibrating = isCalibrating(fullSessionHistory, settings.model.acwr.chronicWindow);
+  const trends = useMemo(() => calculateTrendMetrics(fullSessionHistory), [fullSessionHistory]);
+  const weeklyWellness = useMemo(() => buildWeeklyWellness(sessions, settings.stressScaleMax, 12), [sessions, settings.stressScaleMax]);
 
   const strengthNow = useMemo(() => {
     const history = buildStrengthHistory(calculateSetLoads(strengthSets, settings.strength), settings.strength);
     return history.length > 0 ? history[history.length - 1] : null;
   }, [strengthSets, settings.strength]);
 
-  const recentLoad = useMemo(() => {
-    const lastWeek = fullSessionHistory.slice(-7);
-    return {
-      load: lastWeek.reduce((sum, point) => sum + point.load, 0),
-      climbingDays: lastWeek.filter((point) => point.load > 0).length,
-    };
-  }, [fullSessionHistory]);
-
-  const sessionHistory = useMemo(
-    () => buildSessionHistory(sessions, settings, historyRange),
-    [sessions, settings, historyRange],
-  );
-
-  // Planner: calculate predicted ACWR from manual inputs
+  // Planner: predicted ACWR if the planned session happens on the planned date (days until then are rest).
   const plannerPrediction = useMemo(() => {
-    const snapshots = Object.values(ewmaSnapshots);
-    if (snapshots.length === 0) return null;
+    if (fullSessionHistory.length === 0) return null;
 
-    const acuteWindow = settings.model.acwr.acuteWindow;
-    const chronicWindow = settings.model.acwr.chronicWindow;
-    const acuteAlpha = 2 / (acuteWindow + 1);
-    const chronicAlpha = 2 / (chronicWindow + 1);
-
-    let prevAcute = snapshots.reduce((s, snap) => s + getEwmaValue(snap, acuteWindow), 0);
-    let prevChronic = snapshots.reduce((s, snap) => s + getEwmaValue(snap, chronicWindow), 0);
-    if (prevChronic === 0) return null;
-
-    if (sessions.length > 0) {
-      const lastSession = sessions[sessions.length - 1];
-      const lastSessionDate = new Date(lastSession.createdAt);
-      const lastDate = new Date(lastSessionDate.getUTCFullYear(), lastSessionDate.getUTCMonth(), lastSessionDate.getUTCDate());
-      const plannedDate = new Date(`${plannerDate}T00:00:00Z`);
-      const daysBetween = Math.max(0, Math.floor((plannedDate.getTime() - lastDate.getTime()) / (1000 * 60 * 60 * 24)));
-
-      for (let i = 0; i < daysBetween; i++) {
-        prevAcute = (1 - acuteAlpha) * prevAcute;
-        prevChronic = (1 - chronicAlpha) * prevChronic;
-      }
-    }
-
-    const plannedSession = {
+    const plannedSession: SessionInput = {
       id: "planner",
-      createdAt: new Date(`${plannerDate}T12:00:00Z`).toISOString(),
+      createdAt: `${plannerDate}T12:00:00Z`,
       durationMinutes: plannerDuration,
       sleepHours: plannerSleep,
       stress: plannerStress,
       motivation: 5,
       problems: [
-        {
-          id: "planner-problem",
-          count: plannerCount,
-          grade: plannerGrade,
-          holdType: "mixed" as HoldType,
-          wallAngle: "mixed" as WallAngle,
-        },
+        { id: "planner-problem", count: plannerCount, grade: plannerGrade, holdType: "mixed", wallAngle: "mixed" },
       ],
     };
 
-    const actualLoad = calculateSessionLoad(plannedSession, settings).totalLoad;
-    const newAcute = acuteAlpha * actualLoad + (1 - acuteAlpha) * prevAcute;
-    const predAcwr = prevChronic > 0 ? newAcute / prevChronic : 0;
-    return { predAcwr, actualLoad };
-  }, [ewmaSnapshots, settings, plannerSleep, plannerStress, plannerGrade, plannerCount, plannerDuration, plannerDate, sessions]);
+    const load = calculateSessionLoad(plannedSession, currentReferenceGrade, settings);
+    const prediction = predictAcwr(
+      fullSessionHistory,
+      plannerDate,
+      load.totalLoad,
+      settings.model.acwr.acuteWindow,
+      settings.model.acwr.chronicWindow,
+    );
+    if (!prediction) return null;
+    return { predAcwr: prediction.acwr, actualLoad: load.totalLoad, speedMultiplier: load.speedMultiplier };
+  }, [fullSessionHistory, settings, plannerSleep, plannerStress, plannerGrade, plannerCount, plannerDuration, plannerDate, currentReferenceGrade]);
+
+  const plannerReadiness = useMemo(
+    () => assessReadiness(plannerSleep, plannerSleepQuality, plannerStress, settings),
+    [plannerSleep, plannerSleepQuality, plannerStress, settings],
+  );
 
   const gradeDistribution = useMemo(() => {
     if (!plannerPrediction || plannerPrediction.actualLoad <= 0) return {};
-    return calculateGradeDistribution(plannerPrediction.actualLoad, plannerDuration, plannerSleep, plannerStress, settings);
-  }, [plannerPrediction, plannerDuration, plannerSleep, plannerStress, settings]);
+    return calculateGradeDistribution(plannerPrediction.actualLoad, plannerPrediction.speedMultiplier, currentReferenceGrade, settings);
+  }, [plannerPrediction, currentReferenceGrade, settings]);
 
   // Boulder distribution: show count of each grade centered around planner grade (normal distribution ±2)
   const boulderDistribution = useMemo(() => {
     if (!plannerPrediction || plannerPrediction.actualLoad <= 0) return [];
-    
-    const targetLoad = plannerPrediction.actualLoad;
+
+    const targetLoad = plannerPrediction.actualLoad / plannerPrediction.speedMultiplier;
     const gradeNum = gradeToNumber(plannerGrade);
-    
+
     // Get grades from -2 to +1 relative to center
     const gradesInRange: Array<{ grade: Grade; offset: number }> = [];
     for (let offset = -2; offset <= 1; offset++) {
@@ -410,27 +313,25 @@ function App() {
         gradesInRange.push({ grade, offset });
       }
     }
-    
+
     if (gradesInRange.length === 0) return [];
-    
-    // Calculate normal distribution weights (bell curve centered at offset=0)
-    // Using Gaussian: weight = exp(-(offset^2 / 2)) for std dev = 1
+
+    // Normal-distribution weights centred on the planned grade (sd = 1).
     const weights = gradesInRange.map(({ offset }) => Math.exp(-0.5 * offset * offset));
     const totalWeight = weights.reduce((sum, w) => sum + w, 0);
-    
-    // Calculate intensities for each grade
+
     const distribution: Array<{ grade: Grade; count: number; intensity: number; offset: number }> = [];
     let totalIntensity = 0;
-    
+
     for (let i = 0; i < gradesInRange.length; i++) {
       const { grade, offset } = gradesInRange[i];
       const normalizedWeight = weights[i] / totalWeight;
       const count = Math.round(plannerCount * normalizedWeight);
-      const intensity = calculateGradeIntensity(grade, settings);
+      const intensity = calculateGradeIntensity(grade, currentReferenceGrade, settings);
       distribution.push({ grade, count, intensity, offset });
       totalIntensity += count * intensity;
     }
-    
+
     // Scale all counts to match target load
     if (totalIntensity > 0) {
       const scale = targetLoad / totalIntensity;
@@ -450,92 +351,71 @@ function App() {
         distribution[centerIdx].count += surplus;
       }
     }
-    
+
     return distribution.map(({ grade, count }) => ({ grade, count })).filter((d) => d.count > 0);
-  }, [plannerPrediction, plannerGrade, plannerCount, settings]);
+  }, [plannerPrediction, plannerGrade, plannerCount, currentReferenceGrade, settings]);
 
+  // Worked example for the settings page, built around your current max grade.
   const acwrExample = useMemo(() => {
-    const dummyProblems = 24;
-    const dummyDuration = 120;
-    const dummySleep = 7.5;
-    const dummyStress = 5;
-    const prevAcuteEwma = 95;
-    const prevChronicEwma = 110;
-
+    const problems = 24;
+    const duration = 120;
+    const reference = currentReferenceGrade;
+    const baseGrade = gradeFromNumber(gradeToNumber(reference) - 1);
+    const hardGrade = gradeFromNumber(gradeToNumber(baseGrade) + 2);
     const acuteWindow = settings.model.acwr.acuteWindow;
     const chronicWindow = settings.model.acwr.chronicWindow;
     const acuteAlpha = 2 / (acuteWindow + 1);
     const chronicAlpha = 2 / (chronicWindow + 1);
 
-    const baselineGrade = calculateGradeIntensity("V6", settings);
-    const baselineSpeed = calculateSpeedMultiplier(dummyProblems, dummyDuration, settings);
-    const baselineRecovery = calculateSleepRecoveryMultiplier(dummySleep, settings);
-    const baselineStress = calculateStressMultiplier(dummyStress, settings);
-    const baselineLoad = dummyProblems * baselineGrade * baselineSpeed * baselineRecovery * baselineStress;
-    const nextAcuteEwma = acuteAlpha * baselineLoad + (1 - acuteAlpha) * prevAcuteEwma;
-    const nextChronicEwma = chronicAlpha * baselineLoad + (1 - chronicAlpha) * prevChronicEwma;
-    const nextAcwr = nextChronicEwma <= 0 ? 0 : nextAcuteEwma / nextChronicEwma;
+    const points = calculateGradeIntensity(baseGrade, reference, settings);
+    const speed = calculateSpeedMultiplier(problems, duration, settings);
+    const load = problems * points * speed;
+    // Steady routine of two such sessions a week: both averages sit at 2/7 of a session's load.
+    const prevAcute = (load * 2) / 7;
+    const prevChronic = (load * 2) / 7;
 
     function projectAcwr(newLoad: number): number {
-      const acute = acuteAlpha * newLoad + (1 - acuteAlpha) * prevAcuteEwma;
-      const chronic = chronicAlpha * newLoad + (1 - chronicAlpha) * prevChronicEwma;
+      const acute = acuteAlpha * newLoad + (1 - acuteAlpha) * prevAcute;
+      const chronic = chronicAlpha * newLoad + (1 - chronicAlpha) * prevChronic;
       return chronic <= 0 ? 0 : acute / chronic;
     }
 
-    const hardGradeLoad =
-      dummyProblems *
-      calculateGradeIntensity("V9", settings) *
-      baselineSpeed *
-      baselineRecovery *
-      baselineStress;
-
-    const fasterPaceLoad =
-      dummyProblems *
-      baselineGrade *
-      calculateSpeedMultiplier(dummyProblems, 75, settings) *
-      baselineRecovery *
-      baselineStress;
-
-    const poorSleepLoad =
-      dummyProblems *
-      baselineGrade *
-      baselineSpeed *
-      calculateSleepRecoveryMultiplier(6.0, settings) *
-      baselineStress;
+    const hardGradeLoad = problems * calculateGradeIntensity(hardGrade, reference, settings) * speed;
+    const fasterPaceLoad = problems * points * calculateSpeedMultiplier(problems, 75, settings);
+    const moreProblemsLoad = 32 * points * calculateSpeedMultiplier(32, duration, settings);
 
     return {
-      dummyProblems,
-      dummyDuration,
-      dummySleep,
-      prevAcuteEwma,
-      prevChronicEwma,
+      problems,
+      duration,
+      reference,
+      baseGrade,
+      hardGrade,
+      points,
+      speed,
+      load,
+      prevAcute,
+      prevChronic,
       acuteWindow,
       chronicWindow,
-      acuteAlpha,
-      chronicAlpha,
-      baselineGrade,
-      baselineSpeed,
-      baselineRecovery,
-      baselineLoad,
-      nextAcuteEwma,
-      nextChronicEwma,
-      nextAcwr,
+      nextAcute: acuteAlpha * load + (1 - acuteAlpha) * prevAcute,
+      nextChronic: chronicAlpha * load + (1 - chronicAlpha) * prevChronic,
+      nextAcwr: projectAcwr(load),
       hardGradeLoad,
       fasterPaceLoad,
-      poorSleepLoad,
+      moreProblemsLoad,
       hardGradeAcwr: projectAcwr(hardGradeLoad),
       fasterPaceAcwr: projectAcwr(fasterPaceLoad),
-      poorSleepAcwr: projectAcwr(poorSleepLoad),
+      moreProblemsAcwr: projectAcwr(moreProblemsLoad),
     };
-  }, [settings]);
+  }, [settings, currentReferenceGrade]);
 
   const gradeCurvePoints = useMemo(
     () =>
       GRADES.map((grade) => ({
         x: gradeToNumber(grade),
-        y: calculateGradeIntensity(grade, settings),
+        y: calculateGradeIntensity(grade, currentReferenceGrade, settings),
       })),
-    [settings],
+    [settings, currentReferenceGrade],
   );
 
   const speedCurvePoints = useMemo(
@@ -550,43 +430,14 @@ function App() {
     [settings],
   );
 
-  const sleepPenaltyCurvePoints = useMemo(() => {
-    const maxSleep = settings.model.recovery.personalMaxSleepHours;
-
-    return Array.from({ length: 16 }, (_, index) => {
-      const deficit = index * 0.03;
-      const actualSleep = maxSleep * (1 - deficit);
-      const recovery = calculateSleepRecoveryMultiplier(actualSleep, settings);
-      return {
-        x: deficit * 100,
-        y: (recovery - 1) * 100,
-      };
-    });
-  }, [settings]);
-
-  const stressPenaltyCurvePoints = useMemo(() => {
-    return Array.from({ length: 11 }, (_, index) => {
-      const stress = index;
-      const multiplier = calculateStressMultiplier(stress, settings);
-      return {
-        x: stress * 10,
-        y: (multiplier - 1) * 100,
-      };
-    });
-  }, [settings]);
-
   const displayGradeLabel = (grade: Grade): string => gradeToDisplay(grade, settings.gradeDisplayUnit);
-  const gradeFromNumber = (value: number): Grade => {
-    const bounded = Math.min(17, Math.max(0, Math.round(value)));
-    return `V${bounded}` as Grade;
-  };
+  const readinessLabel: Record<Readiness["level"], string> = { good: "Ready", fair: "Okay", low: "Take it easy" };
 
   useEffect(() => {
     async function bootstrap() {
-      const [savedSettings, savedSessions, savedSnapshots, savedStrengthSets] = await Promise.all([
+      const [savedSettings, savedSessions, savedStrengthSets] = await Promise.all([
         loadSettings(),
         loadSessions(),
-        loadEwmaSnapshots(),
         loadStrengthSets(),
       ]);
 
@@ -594,12 +445,6 @@ function App() {
       setSettings(nextSettings);
       setDraft(createSessionDraft(nextSettings));
       setSessions(savedSessions);
-
-      const mapped = savedSnapshots.reduce<Record<string, EWMASnapshot>>((acc, snapshot) => {
-        acc[snapshot.key] = snapshot;
-        return acc;
-      }, {});
-      setEwmaSnapshots(mapped);
 
       setStrengthSets(savedStrengthSets);
 
@@ -727,6 +572,7 @@ function App() {
       sessionDate: sessionDateIso,
       durationMinutes: session.durationMinutes,
       sleepHours: session.sleepHours,
+      sleepQuality: session.sleepQuality ?? 7,
       stress: session.stress,
       motivation: session.motivation,
       problems: session.problems.map((problem) => ({ ...problem })),
@@ -741,90 +587,12 @@ function App() {
     setDraft(createSessionDraft(settings));
   }
 
-  async function recomputeAndPersistSnapshots(
-    sessionsToReplay: SessionInput[],
-    settingsForCalc: AppSettings,
-  ): Promise<Record<string, EWMASnapshot>> {
-    await clearEwmaSnapshots();
-    const ordered = [...sessionsToReplay].sort(
-      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
-    );
-
-    const windows = [...new Set(settingsForCalc.model.ewmaWindows)];
-    const sessionsByDate = new Map<string, SessionInput[]>();
-    const allKeys = new Set<string>();
-
-    for (const sessionItem of ordered) {
-      const dayKey = getSessionDayKey(sessionItem);
-      const existing = sessionsByDate.get(dayKey) ?? [];
-      existing.push(sessionItem);
-      sessionsByDate.set(dayKey, existing);
-
-      const sessionCalc = calculateSessionLoad(sessionItem, settingsForCalc);
-      for (const entry of sessionCalc.byBoulderType) {
-        allKeys.add(entry.key);
-      }
-    }
-
-    const nextSnapshots: Record<string, EWMASnapshot> = {};
-    for (const key of allKeys) {
-      nextSnapshots[key] = {
-        key,
-        ewma10: 0,
-        ewma15: 0,
-        ewma20: 0,
-        ewma25: 0,
-        updatedAt: new Date().toISOString(),
-      };
-    }
-
-    if (ordered.length === 0) {
-      await Promise.all(Object.values(nextSnapshots).map((snapshot) => saveEwmaSnapshot(snapshot)));
-      return nextSnapshots;
-    }
-
-    const startDate = new Date(ordered[0].createdAt);
-    startDate.setUTCHours(0, 0, 0, 0);
-    const endDate = new Date(ordered[ordered.length - 1].createdAt);
-    endDate.setUTCHours(0, 0, 0, 0);
-
-    const currentDate = new Date(startDate);
-    while (currentDate <= endDate) {
-      const dayKey = currentDate.toISOString().slice(0, 10);
-      const daySessions = sessionsByDate.get(dayKey) ?? [];
-      const loadsByKey: Record<string, number> = {};
-
-      for (const sessionItem of daySessions) {
-        const sessionCalc = calculateSessionLoad(sessionItem, settingsForCalc);
-        for (const entry of sessionCalc.byBoulderType) {
-          loadsByKey[entry.key] = (loadsByKey[entry.key] ?? 0) + entry.adjustedLoad;
-        }
-      }
-
-      for (const key of allKeys) {
-        const updated = updateSnapshot(
-          nextSnapshots[key],
-          key,
-          loadsByKey[key] ?? 0,
-          windows,
-        );
-        nextSnapshots[key] = updated;
-      }
-
-      currentDate.setUTCDate(currentDate.getUTCDate() + 1);
-    }
-
-    await Promise.all(Object.values(nextSnapshots).map((snapshot) => saveEwmaSnapshot(snapshot)));
-    return nextSnapshots;
-  }
-
   function getBackupPayload(): DriveBackupPayload {
     return {
       version: 1,
       exportedAt: new Date().toISOString(),
       settings,
       sessions,
-      ewmaSnapshots: Object.values(ewmaSnapshots),
       strengthSets,
     };
   }
@@ -866,25 +634,16 @@ function App() {
       const payload = JSON.parse(text) as DriveBackupPayload;
       
       await clearSessions();
-      await clearEwmaSnapshots();
 
       const restoredSettings = clampSettings(payload.settings ?? DEFAULT_SETTINGS);
       await saveSettings(restoredSettings);
       for (const s of payload.sessions) { await saveSession(s); }
-      for (const snap of payload.ewmaSnapshots ?? []) { await saveEwmaSnapshot(snap); }
       if (payload.strengthSets) { await replaceStrengthSets(payload.strengthSets); }
 
-      const [sessionsFromDb, snapshotsFromDb, strengthSetsFromDb] = await Promise.all([
-        loadSessions(), loadEwmaSnapshots(), loadStrengthSets(),
-      ]);
-      const mappedSnapshots = snapshotsFromDb.reduce<Record<string, EWMASnapshot>>((acc, snap) => {
-        acc[snap.key] = snap;
-        return acc;
-      }, {});
+      const [sessionsFromDb, strengthSetsFromDb] = await Promise.all([loadSessions(), loadStrengthSets()]);
 
       setSettings(restoredSettings);
       setSessions(sessionsFromDb);
-      setEwmaSnapshots(mappedSnapshots);
       setStrengthSets(strengthSetsFromDb);
       setDraft(createSessionDraft(restoredSettings));
       addDriveLog("Backup imported successfully!");
@@ -922,25 +681,16 @@ function App() {
     try {
       const payload = await downloadBackupFromGoogleDrive(token);
       await clearSessions();
-      await clearEwmaSnapshots();
 
       const restoredSettings = clampSettings(payload.settings ?? DEFAULT_SETTINGS);
       await saveSettings(restoredSettings);
       for (const s of payload.sessions) { await saveSession(s); }
-      for (const snap of payload.ewmaSnapshots ?? []) { await saveEwmaSnapshot(snap); }
       if (payload.strengthSets) { await replaceStrengthSets(payload.strengthSets); }
 
-      const [sessionsFromDb, snapshotsFromDb, strengthSetsFromDb] = await Promise.all([
-        loadSessions(), loadEwmaSnapshots(), loadStrengthSets(),
-      ]);
-      const mappedSnapshots = snapshotsFromDb.reduce<Record<string, EWMASnapshot>>((acc, snap) => {
-        acc[snap.key] = snap;
-        return acc;
-      }, {});
+      const [sessionsFromDb, strengthSetsFromDb] = await Promise.all([loadSessions(), loadStrengthSets()]);
 
       setSettings(restoredSettings);
       setSessions(sessionsFromDb);
-      setEwmaSnapshots(mappedSnapshots);
       setStrengthSets(strengthSetsFromDb);
       setDraft(createSessionDraft(restoredSettings));
     } catch {
@@ -967,9 +717,6 @@ function App() {
       }
 
       const updated = await loadSessions();
-      const recalculatedSnapshots = await recomputeAndPersistSnapshots(updated, settings);
-
-      setEwmaSnapshots(recalculatedSnapshots);
       setSessions(updated.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()));
       addDriveLog(`Merged ${sessionsToAdd.length} sessions from Drive.`);
       showNotification(`Merged ${sessionsToAdd.length} sessions from Drive.`);
@@ -1053,7 +800,7 @@ function App() {
     try {
       const { importFromDate, lastSyncedAt } = settingsForSync.toplogger;
       // Re-check a few days before the last sync to catch climbs logged late.
-      const lastSyncedDay = lastSyncedAt ? shiftIsoDate(lastSyncedAt.slice(0, 10), -3) : undefined;
+      const lastSyncedDay = lastSyncedAt ? addDays(lastSyncedAt.slice(0, 10), -3) : undefined;
       // Sessions synced before tries were recorded get backfilled with one full re-sync.
       const needsBackfill = (await loadSessions()).some((item) => item.source === "toplogger" && !item.toplogger);
       const since = !needsBackfill && lastSyncedDay && lastSyncedDay > importFromDate ? lastSyncedDay : importFromDate;
@@ -1098,8 +845,6 @@ function App() {
 
       if (added + updated > 0) {
         const allSessions = Array.from(sessionsById.values());
-        const recalculatedSnapshots = await recomputeAndPersistSnapshots(allSessions, settingsForSync);
-        setEwmaSnapshots(recalculatedSnapshots);
         setSessions(allSessions.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()));
       }
 
@@ -1231,6 +976,7 @@ function App() {
       createdAt: editingSessionCreatedAt ?? sessionDateIso,
       durationMinutes: draft.durationMinutes,
       sleepHours: draft.sleepHours,
+      sleepQuality: draft.sleepQuality,
       stress: draft.stress,
       motivation: draft.motivation,
       problems: draft.problems,
@@ -1257,9 +1003,6 @@ function App() {
       : [session, ...sessions];
 
     await saveSession(session);
-    const recalculatedSnapshots = await recomputeAndPersistSnapshots(updatedSessions, nextSettings);
-
-    setEwmaSnapshots(recalculatedSnapshots);
     setSessions(updatedSessions.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()));
     setDraft(createSessionDraft(nextSettings));
     setEditingSessionId(undefined);
@@ -1331,7 +1074,7 @@ function App() {
                   }[getAcwrZoneKey(overallAcwr, settings.model.acwr.lowThreshold, settings.model.acwr.highThreshold)]}
             </h1>
             <p className="hero-sub">
-              Capacity range for a max of {displayGradeLabel(settings.climberMaxGrade)}:{" "}
+              Capacity range for your current max of {displayGradeLabel(currentReferenceGrade)}:{" "}
               <strong>
                 {displayGradeLabel(gradeFromNumber(capacityRange.min))} – {displayGradeLabel(gradeFromNumber(capacityRange.max))}
               </strong>
@@ -1354,9 +1097,10 @@ function App() {
             </article>
             <article className="stat-tile">
               <span className="stat-label">Last 7 days</span>
-              <strong className="stat-value">{formatCompact(recentLoad.load)}</strong>
+              <strong className="stat-value">{formatCompact(trends.thisWeekLoad)}</strong>
               <span className="stat-meta">
-                load · {recentLoad.climbingDays} climbing day{recentLoad.climbingDays === 1 ? "" : "s"}
+                load · {trends.activeDays} climbing day{trends.activeDays === 1 ? "" : "s"}
+                {trends.weekOverWeek !== null && ` · ${trends.weekOverWeek >= 0 ? "+" : "−"}${Math.abs(trends.weekOverWeek * 100).toFixed(0)}%`}
               </span>
             </article>
             <article className="stat-tile">
@@ -1468,7 +1212,7 @@ function App() {
             <h2>How did it feel?</h2>
             {editingSessionId && (
               <p>
-                Editing existing session. Save will update the same history entry and recalculate ACWR/EWMA.
+                Editing an existing session. Saving updates it in your history.
               </p>
             )}
             <div className="field-grid">
@@ -1504,6 +1248,22 @@ function App() {
                 />
               </label>
               <label>
+                Sleep quality (10 = great)
+                <select
+                  value={draft.sleepQuality}
+                  onChange={(event) => {
+                    const value = Number(event.target.value);
+                    setDraft((previous) => ({ ...previous, sleepQuality: value }));
+                  }}
+                >
+                  {Array.from({ length: 10 }, (_, index) => index + 1).map((value) => (
+                    <option key={`quality-${value}`} value={value}>
+                      {value}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
                 Stress ({settings.stressScaleMax} max)
                 <select
                   value={draft.stress}
@@ -1537,15 +1297,17 @@ function App() {
               </label>
             </div>
 
-            {estimatedLoad && (
-              <div className="metric-row">
-                <span>
-                  Estimated load: <strong>{estimatedLoad.totalLoad.toFixed(2)}</strong>
-                </span>
-                <span>Speed x {estimatedLoad.speedMultiplier.toFixed(2)}</span>
-                <span>Recovery x {estimatedLoad.recoveryMultiplier.toFixed(2)}</span>
-              </div>
-            )}
+            <div className="session-summary">
+              {estimatedLoad && (
+                <p>
+                  Estimated load <strong>{estimatedLoad.totalLoad.toFixed(0)}</strong>
+                  <span className="muted-inline">
+                    {" "}· pace ×{estimatedLoad.speedMultiplier.toFixed(2)} · measured against {displayGradeLabel(estimatedLoad.referenceGrade)}
+                  </span>
+                </p>
+              )}
+              <ReadinessNote readiness={draftReadiness} label={readinessLabel[draftReadiness.level]} />
+            </div>
 
             <div className="metric-row">
               <button type="button" className="primary" onClick={() => void saveCurrentSession()} disabled={draft.problems.length === 0}>
@@ -1553,7 +1315,7 @@ function App() {
               </button>
               {editingSessionId && (
                 <button type="button" onClick={cancelEditSession}>
-                  Cancel Edit
+                  Cancel edit
                 </button>
               )}
             </div>
@@ -1633,6 +1395,12 @@ function App() {
                   Sweet spot {settings.model.acwr.lowThreshold.toFixed(2)}–{settings.model.acwr.highThreshold.toFixed(2)} · target{" "}
                   {settings.model.acwr.targetAcwr.toFixed(2)} · windows {settings.model.acwr.acuteWindow}/{settings.model.acwr.chronicWindow} days
                 </p>
+                {acwrCalibrating && (
+                  <p className="bootstrap-warning">
+                    Still calibrating: {fullSessionHistory.length} of {settings.model.acwr.chronicWindow} days of history. Treat the
+                    ratio as rough until then.
+                  </p>
+                )}
               </div>
             )}
           </article>
@@ -1642,19 +1410,38 @@ function App() {
             <dl className="fact-list">
               <div>
                 <dt>Load, last 7 days</dt>
-                <dd>{formatCompact(recentLoad.load)}</dd>
+                <dd>{trends.thisWeekLoad.toFixed(0)}</dd>
+                {trends.weekOverWeek !== null && (
+                  <span className={`fact-note ${Math.abs(trends.weekOverWeek) > 0.15 ? "warn" : ""}`}>
+                    {trends.weekOverWeek >= 0 ? "▴" : "▾"} {Math.abs(trends.weekOverWeek * 100).toFixed(0)}% vs previous week
+                  </span>
+                )}
               </div>
               <div>
                 <dt>Climbing days</dt>
-                <dd>{recentLoad.climbingDays}</dd>
+                <dd>{trends.activeDays}</dd>
+                <span className="fact-note">in the last 7 days</span>
+              </div>
+              <div>
+                <dt>Monotony</dt>
+                <dd>{trends.monotony === null ? "–" : trends.monotony.toFixed(2)}</dd>
+                <span className={`fact-note ${trends.monotony !== null && trends.monotony > 2 ? "warn" : ""}`}>
+                  {trends.monotony === null ? "needs varied days" : trends.monotony > 2 ? "very samey: vary hard and easy days" : "good mix of hard and easy"}
+                </span>
+              </div>
+              <div>
+                <dt>Strain</dt>
+                <dd>{trends.strain === null ? "–" : trends.strain.toFixed(0)}</dd>
+                <span className="fact-note">weekly load × monotony</span>
+              </div>
+              <div>
+                <dt>Current max grade</dt>
+                <dd>{displayGradeLabel(currentReferenceGrade)}</dd>
+                <span className="fact-note">loads are measured against this</span>
               </div>
               <div>
                 <dt>Last session</dt>
                 <dd>{sessions[0] ? formatLongDate(getSessionDayKey(sessions[0])) : "–"}</dd>
-              </div>
-              <div>
-                <dt>Max grade</dt>
-                <dd>{displayGradeLabel(settings.climberMaxGrade)}</dd>
               </div>
             </dl>
           </article>
@@ -1687,19 +1474,26 @@ function App() {
           {/* Next-session planner */}
           <article className="panel full-width">
             <h2>Plan your next session</h2>
-            <p className="muted-hint">Enter your planned session details to see what ACWR you'll reach. Your ACWR target: <strong>{settings.model.acwr.targetAcwr.toFixed(2)}</strong>.</p>
+            <p className="muted-hint">
+              See what ACWR a session would bring you to. Days until the planned date count as rest. Target:{" "}
+              <strong>{settings.model.acwr.targetAcwr.toFixed(2)}</strong>.
+            </p>
             {plannerPrediction === null ? (
               <p>Log at least one session to enable the planner.</p>
             ) : (
               <>
                 <div className="planner-inputs-row">
                   <label className="planner-input-label">
-                    Session Date
-                    <input type="date" value={plannerDate} onChange={(e) => setPlannerDate(e.target.value)} />
+                    Session date
+                    <input type="date" min={todayIsoDate()} value={plannerDate} onChange={(e) => setPlannerDate(e.target.value)} />
                   </label>
                   <label className="planner-input-label">
                     Sleep (h)
                     <NumberInput value={plannerSleep} min={0} max={14} step={0.5} onCommit={setPlannerSleep} />
+                  </label>
+                  <label className="planner-input-label">
+                    Sleep quality (1–10)
+                    <NumberInput value={plannerSleepQuality} min={1} max={10} step={1} onCommit={setPlannerSleepQuality} />
                   </label>
                   <label className="planner-input-label">
                     Stress (1–{settings.stressScaleMax})
@@ -1731,24 +1525,32 @@ function App() {
                   </div>
                   <div className="planner-result">
                     <span className="planner-acwr-label">Predicted ACWR</span>
-                    <span className={`planner-acwr-value ${getAcwrZone(plannerPrediction.predAcwr, settings.model.acwr.lowThreshold, settings.model.acwr.highThreshold).toLowerCase().replace(" ", "-")}`}>
+                    <span className={`planner-acwr-value ${getAcwrZoneKey(plannerPrediction.predAcwr, settings.model.acwr.lowThreshold, settings.model.acwr.highThreshold)}`}>
                       {plannerPrediction.predAcwr.toFixed(2)}
                     </span>
                   </div>
                   <div className="planner-result">
-                    <span className="planner-acwr-label">Estimated Load</span>
+                    <span className="planner-acwr-label">Estimated load</span>
                     <span className="planner-acwr-value">
                       {plannerPrediction.actualLoad.toFixed(0)}
                     </span>
                   </div>
                 </div>
+                <ReadinessNote readiness={plannerReadiness} label={readinessLabel[plannerReadiness.level]} />
 
                 {plannerPrediction && Object.keys(gradeDistribution).length > 0 && (
                   <div className="grade-distribution">
                     <h3>Same load, one grade</h3>
                     <p className="muted-hint">How many boulders of a single grade give the same load ({plannerPrediction.actualLoad.toFixed(0)}).</p>
                     {(() => {
-                      const grades = GRADES.filter((grade) => gradeDistribution[grade] > 0);
+                      // Grades far below your max need absurd counts to match the load, so show the useful range.
+                      const maxNumber = gradeToNumber(currentReferenceGrade);
+                      const grades = GRADES.filter(
+                        (grade) =>
+                          gradeDistribution[grade] > 0 &&
+                          gradeToNumber(grade) >= maxNumber - 4 &&
+                          gradeToNumber(grade) <= maxNumber + 2,
+                      );
                       return (
                         <ColumnChart
                           ariaLabel="Boulders needed per grade for the same load"
@@ -1784,41 +1586,14 @@ function App() {
           </article>
 
           <article className="panel full-width">
-            <h2>ACWR by hold type and wall angle</h2>
-            {sessions.length > 0 && sessions.length < Math.max(...settings.model.ewmaWindows) && (
-              <p className="bootstrap-warning">
-                ⚠ EWMA is still stabilising — using session average as seed ({sessions.length}/{Math.max(...settings.model.ewmaWindows)} sessions logged). Values will become more accurate as you log more sessions.
+            <div className="panel-heading">
+              <h2>Sleep &amp; stress, week by week</h2>
+              <p className="muted-hint">
+                Weekly averages from your sessions. These shape your readiness, not your load: a bad night doesn't make a
+                session bigger, it makes you less ready for one.
               </p>
-            )}
-            {acwrRows.length === 0 && <p>Save a session to generate ACWR values.</p>}
-            {acwrRows.length > 0 && (
-              <div className="table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Boulder type</th>
-                    <th>Acute EWMA</th>
-                    <th>Chronic EWMA</th>
-                    <th>ACWR</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {acwrRows.map((row) => (
-                      <tr key={row.key}>
-                        <td>{row.key.replace("__", " · ")}</td>
-                        <td className="num">{formatCompact(row.acute)}</td>
-                        <td className="num">{formatCompact(row.chronic)}</td>
-                        <td className="num">{row.acwr.toFixed(2)}</td>
-                        <td>
-                          <ZoneBadge acwr={row.acwr} low={settings.model.acwr.lowThreshold} high={settings.model.acwr.highThreshold} />
-                        </td>
-                      </tr>
-                    ))}
-                </tbody>
-              </table>
-              </div>
-            )}
+            </div>
+            <WellnessCharts weeks={weeklyWellness} personalMaxSleep={settings.model.recovery.personalMaxSleepHours} />
           </article>
         </section>
       )}
@@ -1906,7 +1681,7 @@ function App() {
             <h2>Model tuning</h2>
             <div className="field-grid">
               <label>
-                Grade base points (V0)
+                Points per problem at your max grade
                 <NumberInput
                   value={settings.model.gradeIntensity.basePoints}
                   min={1}
@@ -1920,11 +1695,11 @@ function App() {
                 />
               </label>
               <label>
-                Grade multiplier per grade
+                Multiplier per grade
                 <NumberInput
                   value={settings.model.gradeIntensity.multiplierPerGrade}
-                  min={1.01}
-                  max={10}
+                  min={1.1}
+                  max={3}
                   step={0.05}
                   onCommit={(value) =>
                     patchSettings((next) => {
@@ -1948,38 +1723,6 @@ function App() {
                   }
                 />
                 <span className="range-value">{settings.model.speed.impactPercent}%</span>
-              </label>
-              <label>
-                Sleep impact (% increase at 0 hours)
-                <input
-                  type="range"
-                  min="0"
-                  max="100"
-                  step="1"
-                  value={settings.model.recovery.sleepImpactPercent}
-                  onChange={(e) =>
-                    patchSettings((next) => {
-                      next.model.recovery.sleepImpactPercent = Number(e.target.value);
-                    })
-                  }
-                />
-                <span className="range-value">{settings.model.recovery.sleepImpactPercent}%</span>
-              </label>
-              <label>
-                Stress impact (% increase at 10/10 stress)
-                <input
-                  type="range"
-                  min="0"
-                  max="100"
-                  step="1"
-                  value={settings.model.recovery.stressImpactPercent}
-                  onChange={(e) =>
-                    patchSettings((next) => {
-                      next.model.recovery.stressImpactPercent = Number(e.target.value);
-                    })
-                  }
-                />
-                <span className="range-value">{settings.model.recovery.stressImpactPercent}%</span>
               </label>
               <label>
                 ACWR acute window (days)
@@ -2054,7 +1797,7 @@ function App() {
                 <span className="range-value">{settings.model.acwr.targetAcwr.toFixed(2)}</span>
               </label>
               <label>
-                Sleep max hours
+                Your ideal sleep (hours)
                 <NumberInput
                   value={settings.model.recovery.personalMaxSleepHours}
                   min={1}
@@ -2076,33 +1819,35 @@ function App() {
 
           <article className="panel">
             <h2>Grade intensity</h2>
-            <p>Shows relative difficulty: 1 V6 = X × V5 (depends on multiplier: {settings.model.gradeIntensity.multiplierPerGrade.toFixed(2)}).</p>
+            <p className="muted-hint">
+              Points per problem, measured against your current max of <strong>{displayGradeLabel(currentReferenceGrade)}</strong>: the
+              hardest grade you've logged on at least two days in the past year. Each grade up multiplies by{" "}
+              {settings.model.gradeIntensity.multiplierPerGrade.toFixed(2)}.
+            </p>
+            <div className="table-scroll">
             <table className="grade-conversion-table">
               <thead>
                 <tr>
                   <th>Grade</th>
-                  <th>Intensity</th>
-                  <th>Relative to V0</th>
-                  <th>= How many V5s</th>
+                  <th>Points</th>
+                  <th>vs. your max</th>
                 </tr>
               </thead>
               <tbody>
                 {GRADES.map((g) => {
-                  const intensity = calculateGradeIntensity(g, settings);
-                  const v5Intensity = calculateGradeIntensity("V5" as Grade, settings);
-                  const relativeToV0 = intensity / settings.model.gradeIntensity.basePoints;
-                  const equivalentV5s = intensity / v5Intensity;
+                  const intensity = calculateGradeIntensity(g, currentReferenceGrade, settings);
+                  const relative = intensity / settings.model.gradeIntensity.basePoints;
                   return (
-                    <tr key={g}>
+                    <tr key={g} className={g === currentReferenceGrade ? "highlight-row" : undefined}>
                       <td>{gradeToDisplay(g, settings.gradeDisplayUnit)}</td>
-                      <td>{intensity.toFixed(1)}</td>
-                      <td>{relativeToV0.toFixed(2)}x</td>
-                      <td>{equivalentV5s.toFixed(2)}x</td>
+                      <td className="num">{intensity < 10 ? intensity.toFixed(2) : intensity.toFixed(1)}</td>
+                      <td className="num">{relative.toFixed(2)}×</td>
                     </tr>
                   );
                 })}
               </tbody>
             </table>
+            </div>
 
           </article>
 
@@ -2172,32 +1917,38 @@ function App() {
           <article className="panel full-width">
             <h2>How the maths works</h2>
             <h3>A worked example</h3>
-            <p>
-              Dummy session: {acwrExample.dummyProblems} problems, {acwrExample.dummyDuration} min, {" "}
-              {acwrExample.dummySleep.toFixed(1)}h sleep.
-            </p>
-            <p>
-              Base load = problems x gradeIntensity x speedMultiplier x recoveryMultiplier
-            </p>
-            <p>
-              Base load = {acwrExample.dummyProblems} x {acwrExample.baselineGrade.toFixed(3)} x {" "}
-              {acwrExample.baselineSpeed.toFixed(3)} x {acwrExample.baselineRecovery.toFixed(3)} = {" "}
-              {acwrExample.baselineLoad.toFixed(2)}
-            </p>
-            <p>
-              Acute EWMA ({acwrExample.acuteWindow}) = alphaA x load + (1 - alphaA) x prevAcute
-            </p>
-            <p>
-              Chronic EWMA ({acwrExample.chronicWindow}) = alphaC x load + (1 - alphaC) x prevChronic
-            </p>
-            <p>
-              ACWR = Acute EWMA / Chronic EWMA = {acwrExample.nextAcuteEwma.toFixed(2)} / {" "}
-              {acwrExample.nextChronicEwma.toFixed(2)} = {acwrExample.nextAcwr.toFixed(2)}
-            </p>
+            <div className="math-steps">
+              <p>
+                Say you climb {acwrExample.problems} × {displayGradeLabel(acwrExample.baseGrade)} in {acwrExample.duration} minutes, with a current
+                max of {displayGradeLabel(acwrExample.reference)}, and you've been doing two of those a week.
+              </p>
+              <p>
+                <span className="math-label">Points per problem</span>
+                {settings.model.gradeIntensity.basePoints} × {settings.model.gradeIntensity.multiplierPerGrade.toFixed(2)}
+                <sup>{gradeToNumber(acwrExample.baseGrade) - gradeToNumber(acwrExample.reference)}</sup> = {acwrExample.points.toFixed(2)}
+              </p>
+              <p>
+                <span className="math-label">Session load</span>
+                {acwrExample.problems} × {acwrExample.points.toFixed(2)} × pace {acwrExample.speed.toFixed(2)} = <strong>{acwrExample.load.toFixed(0)}</strong>
+              </p>
+              <p>
+                <span className="math-label">Acute ({acwrExample.acuteWindow} d)</span>
+                α·load + (1 − α)·previous = {acwrExample.nextAcute.toFixed(1)}
+              </p>
+              <p>
+                <span className="math-label">Chronic ({acwrExample.chronicWindow} d)</span>
+                α·load + (1 − α)·previous = {acwrExample.nextChronic.toFixed(1)}
+              </p>
+              <p>
+                <span className="math-label">ACWR</span>
+                {acwrExample.nextAcute.toFixed(1)} ÷ {acwrExample.nextChronic.toFixed(1)} = <strong>{acwrExample.nextAcwr.toFixed(2)}</strong>
+              </p>
+              <p className="muted-hint">α = 2 ÷ (window + 1). Sleep and stress don't enter the load; they show up as readiness.</p>
+            </div>
 
             <h3>How much each day counts</h3>
-            <p>Shows how much each day's load contributes to the EWMA calculation. Shorter windows (10d) weight recent days more heavily.</p>
-            <EwmaWeightsChart />
+            <p className="muted-hint">How much each past day weighs in your acute and chronic averages. The acute one reacts fast; the chronic one remembers longer.</p>
+            <EwmaWeightsChart acuteWindow={settings.model.acwr.acuteWindow} chronicWindow={settings.model.acwr.chronicWindow} />
 
             <h3>Model curves</h3>
             <div className="curve-grid">
@@ -2218,45 +1969,20 @@ function App() {
                 xFormatter={(value) => value.toFixed(0)}
                 yFormatter={(value) => `${value.toFixed(2)}x`}
               />
-              <CurveChart
-                title="Sleep penalty"
-                xLabel="Sleep deficit %"
-                points={sleepPenaltyCurvePoints}
-                color="var(--series-3)"
-                xFormatter={(value) => `${value.toFixed(0)}%`}
-                yFormatter={(value) => `${value.toFixed(1)}%`}
-              />
-              <CurveChart
-                title="Stress penalty"
-                xLabel="Stress level (0-10)"
-                points={stressPenaltyCurvePoints}
-                color="var(--series-4)"
-                xFormatter={(value) => (value / 10).toFixed(1)}
-                yFormatter={(value) => `${value.toFixed(1)}%`}
-              />
             </div>
 
             <div className="example-grid">
               <article className="math-card">
-                <h4>Grade harder (V6 to V9)</h4>
-                <p>Load changes to {formatCompact(acwrExample.hardGradeLoad)}</p>
-                <p>
-                  ACWR: {acwrExample.hardGradeAcwr.toFixed(2)}
-                </p>
+                <h4>Two grades harder ({displayGradeLabel(acwrExample.baseGrade)} → {displayGradeLabel(acwrExample.hardGrade)})</h4>
+                <p>Load {acwrExample.hardGradeLoad.toFixed(0)} · ACWR {acwrExample.hardGradeAcwr.toFixed(2)}</p>
               </article>
               <article className="math-card">
-                <h4>Climb faster (120 to 75 min)</h4>
-                <p>Load changes to {formatCompact(acwrExample.fasterPaceLoad)}</p>
-                <p>
-                  ACWR: {acwrExample.fasterPaceAcwr.toFixed(2)}
-                </p>
+                <h4>Faster ({acwrExample.duration} → 75 min)</h4>
+                <p>Load {acwrExample.fasterPaceLoad.toFixed(0)} · ACWR {acwrExample.fasterPaceAcwr.toFixed(2)}</p>
               </article>
               <article className="math-card">
-                <h4>Sleep less (7.5h to 6.0h)</h4>
-                <p>Load changes to {formatCompact(acwrExample.poorSleepLoad)}</p>
-                <p>
-                  ACWR: {acwrExample.poorSleepAcwr.toFixed(2)}
-                </p>
+                <h4>More problems ({acwrExample.problems} → 32)</h4>
+                <p>Load {acwrExample.moreProblemsLoad.toFixed(0)} · ACWR {acwrExample.moreProblemsAcwr.toFixed(2)}</p>
               </article>
             </div>
           </article>
@@ -2306,7 +2032,9 @@ function App() {
                         <td>{count}</td>
                         <td>{gradesLabel}</td>
                         <td>{session.durationMinutes} min</td>
-                        <td>{session.sleepHours.toFixed(1)} h</td>
+                        <td className="nowrap">
+                          {session.sleepHours.toFixed(1)} h{session.sleepQuality !== undefined ? ` · ${session.sleepQuality}/10` : ""}
+                        </td>
                         <td>{session.stress}</td>
                         <td>{session.motivation}</td>
                         <td>

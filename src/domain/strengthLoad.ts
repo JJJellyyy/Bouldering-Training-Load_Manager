@@ -1,5 +1,5 @@
 import type { StrengthConfig, StrengthSet } from "../types";
-import type { HistoryPoint } from "./loadCalculator";
+import { buildAcwrHistory, fillDailyLoads, todayIsoDate, type HistoryPoint } from "./acwr";
 
 /** Timed sets (isometrics, hangs) count one rep-equivalent per this many seconds under load. */
 const SECONDS_PER_REP_EQUIVALENT = 4;
@@ -71,42 +71,18 @@ export function calculateSetLoads(sets: StrengthSet[], config: StrengthConfig): 
   });
 }
 
-function addDays(isoDate: string, days: number): string {
-  const date = new Date(`${isoDate}T00:00:00Z`);
-  date.setUTCDate(date.getUTCDate() + days);
-  return date.toISOString().slice(0, 10);
-}
-
 /** Daily load + EWMA ACWR from the first logged set through `endDate` (default today), so ACWR decays on rest days. */
 export function buildStrengthHistory(
   setLoads: StrengthSetLoad[],
   config: StrengthConfig,
-  endDate: string = new Date().toISOString().slice(0, 10),
+  endDate: string = todayIsoDate(),
 ): HistoryPoint[] {
-  if (setLoads.length === 0) return [];
-
   const loadByDate = new Map<string, number>();
   for (const item of setLoads) {
     loadByDate.set(item.set.date, (loadByDate.get(item.set.date) ?? 0) + item.load);
   }
 
-  const startDate = setLoads.reduce((min, item) => (item.set.date < min ? item.set.date : min), setLoads[0].set.date);
-  const lastDate = endDate > startDate ? endDate : startDate;
-  const acuteAlpha = 2 / (config.acuteWindow + 1);
-  const chronicAlpha = 2 / (config.chronicWindow + 1);
-
-  let acute = 0;
-  let chronic = 0;
-  const points: HistoryPoint[] = [];
-
-  for (let date = startDate; date <= lastDate; date = addDays(date, 1)) {
-    const load = loadByDate.get(date) ?? 0;
-    acute = acuteAlpha * load + (1 - acuteAlpha) * acute;
-    chronic = chronicAlpha * load + (1 - chronicAlpha) * chronic;
-    points.push({ date, load, acute, chronic, acwr: chronic > 0 ? acute / chronic : 0 });
-  }
-
-  return points;
+  return buildAcwrHistory(fillDailyLoads(loadByDate, endDate), config.acuteWindow, config.chronicWindow);
 }
 
 /** Current acute/chronic/ACWR per exercise or per category. */

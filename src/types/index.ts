@@ -48,7 +48,6 @@ export type Grade = (typeof GRADES)[number];
 export type HoldType = (typeof HOLD_TYPES)[number];
 export type WallAngle = (typeof WALL_ANGLES)[number];
 
-export type EWMADays = 10 | 15 | 20 | 25;
 export type GradeDisplayUnit = "v" | "font";
 export type SessionSource = "manual" | "toplogger";
 export type StrengthLoadMetric = "relative" | "volume" | "sets";
@@ -68,6 +67,8 @@ export interface SessionInput {
   createdAt: string;
   durationMinutes: number;
   sleepHours: number;
+  /** Sleep quality 1–10; absent on older and synced sessions. */
+  sleepQuality?: number;
   stress: number;
   motivation: number;
   problems: ProblemEntry[];
@@ -90,26 +91,13 @@ export interface TopLoggerSessionStats {
   totalTries?: number;
 }
 
-export interface BoulderTypeLoad {
-  key: string;
-  holdType: HoldType;
-  wallAngle: WallAngle;
-  rawLoad: number;
-  adjustedLoad: number;
-}
-
-export interface EWMASnapshot {
-  key: string;
-  ewma10: number;
-  ewma15: number;
-  ewma20: number;
-  ewma25: number;
-  updatedAt: string;
-}
-
 export interface GradeIntensityConfig {
+  /** Points for one problem at your current max grade. */
   basePoints: number;
+  /** Factor per grade above (or divisor per grade below) your current max. */
   multiplierPerGrade: number;
+  /** Marks the relative-to-max model; settings without it predate it and get new defaults. */
+  relativeToMax: true;
 }
 
 export interface SpeedMultiplierConfig {
@@ -118,15 +106,12 @@ export interface SpeedMultiplierConfig {
 
 export interface RecoveryConfig {
   personalMaxSleepHours: number;
-  sleepImpactPercent: number;
-  stressImpactPercent: number;
 }
 
 export interface LoadModelConfig {
   gradeIntensity: GradeIntensityConfig;
   speed: SpeedMultiplierConfig;
   recovery: RecoveryConfig;
-  ewmaWindows: number[];
   acwr: {
     acuteWindow: number;
     chronicWindow: number;
@@ -134,7 +119,6 @@ export interface LoadModelConfig {
     highThreshold: number;
     targetAcwr: number;
   };
-  showAllCombinations: boolean;
 }
 
 export interface StrengthConfig {
@@ -179,8 +163,8 @@ export interface AppSettings {
 export interface CalculationResult {
   totalLoad: number;
   speedMultiplier: number;
-  recoveryMultiplier: number;
-  byBoulderType: BoulderTypeLoad[];
+  /** The max grade this session was measured against. */
+  referenceGrade: Grade;
 }
 
 export interface DriveBackupPayload {
@@ -188,7 +172,8 @@ export interface DriveBackupPayload {
   exportedAt: string;
   settings: AppSettings;
   sessions: SessionInput[];
-  ewmaSnapshots: EWMASnapshot[];
+  /** Per hold/angle snapshots from older versions; no longer written or read. */
+  ewmaSnapshots?: unknown[];
   strengthSets?: StrengthSet[];
 }
 

@@ -54,27 +54,24 @@ export function LoadTotalsChart({ history, rangeDays }: { history: HistoryPoint[
   );
 }
 
-const EWMA_WINDOWS = [
-  { days: 10, color: "var(--series-1)" },
-  { days: 15, color: "var(--series-2)" },
-  { days: 20, color: "var(--series-3)" },
-  { days: 25, color: "var(--series-4)" },
-] as const;
-
-/** How much each past day weighs in an EWMA: alpha · (1 − alpha)^d with alpha = 2 / (N + 1). */
-export function EwmaWeightsChart() {
-  const days = Array.from({ length: 31 }, (_, day) => day);
+/** How much each past day weighs in the acute and chronic EWMA: alpha · (1 − alpha)^d with alpha = 2 / (N + 1). */
+export function EwmaWeightsChart({ acuteWindow, chronicWindow }: { acuteWindow: number; chronicWindow: number }) {
+  const days = Array.from({ length: Math.max(31, chronicWindow + 1) }, (_, day) => day);
+  const windows = [
+    { days: acuteWindow, label: `Acute (${acuteWindow}-day)`, color: "var(--series-1)" },
+    { days: chronicWindow, label: `Chronic (${chronicWindow}-day)`, color: "var(--series-2)" },
+  ];
 
   return (
     <LineChart
-      ariaLabel="EWMA weight per day for 10, 15, 20 and 25 day windows"
+      ariaLabel={`EWMA weight per day for the ${acuteWindow}-day and ${chronicWindow}-day windows`}
       xLabels={days.map((day) => `${day}d`)}
       xTitles={days.map((day) => (day === 0 ? "Today" : `${day} day${day === 1 ? "" : "s"} ago`))}
-      series={EWMA_WINDOWS.map((window) => {
+      series={windows.map((window) => {
         const alpha = 2 / (window.days + 1);
         return {
-          id: `ewma-${window.days}`,
-          label: `${window.days}-day window`,
+          id: `ewma-${window.label}`,
+          label: window.label,
           color: window.color,
           values: days.map((day) => alpha * (1 - alpha) ** day * 100),
         };

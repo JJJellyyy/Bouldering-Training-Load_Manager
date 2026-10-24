@@ -51,6 +51,8 @@ interface LineChartProps {
   endLabels?: boolean;
   /** Draw a soft wash under a single series. */
   area?: boolean;
+  /** Mark every data point; use for sparse data where isolated points would otherwise be invisible. */
+  showDots?: boolean;
   showLegend?: boolean;
   xAxisLabel?: string;
   activeIndex?: number | null;
@@ -73,6 +75,7 @@ export function LineChart({
   tooltipExtras,
   endLabels = false,
   area = false,
+  showDots = false,
   showLegend = series.length > 1,
   xAxisLabel,
   activeIndex: controlledIndex,
@@ -230,6 +233,15 @@ export function LineChart({
           {series.map((serie) => (
             <path key={serie.id} d={linePath(serie.values)} fill="none" style={{ stroke: serie.color }} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
           ))}
+
+          {showDots &&
+            series.map((serie) =>
+              serie.values.map((value, index) =>
+                value === null ? null : (
+                  <circle key={`${serie.id}-${index}`} cx={toX(index)} cy={toY(value)} r={4} className="chart-dot" style={{ fill: serie.color }} />
+                ),
+              ),
+            )}
 
           {endLabels &&
             series.map((serie) => {

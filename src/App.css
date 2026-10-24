@@ -781,6 +781,135 @@ td.num {
   font-weight: 650;
 }
 
+.fact-list .fact-note {
+  display: block;
+  margin-top: 0.15rem;
+  font-size: 0.74rem;
+  color: var(--ink-muted);
+}
+
+.fact-list .fact-note.warn {
+  color: var(--status-warning-ink);
+  font-weight: 600;
+}
+
+/* ── Session summary & readiness ───────────────────────────────── */
+.session-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0.9rem 0 0.25rem;
+}
+
+.muted-inline {
+  color: var(--ink-muted);
+  font-size: 0.85rem;
+}
+
+.readiness-note {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.55rem 0.8rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.86rem;
+  color: var(--ink-secondary);
+  background: var(--surface-sunken);
+  margin-top: 0.75rem;
+}
+
+.readiness-label {
+  padding: 0.12rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  font-weight: 650;
+}
+
+.readiness-note.good .readiness-label {
+  background: color-mix(in srgb, var(--status-good) 16%, transparent);
+  color: var(--status-good-ink);
+}
+
+.readiness-note.fair .readiness-label {
+  background: color-mix(in srgb, var(--status-warning) 18%, transparent);
+  color: var(--status-warning-ink);
+}
+
+.readiness-note.low .readiness-label {
+  background: color-mix(in srgb, var(--status-critical) 16%, transparent);
+  color: var(--status-critical-ink);
+}
+
+/* ── Wellness ──────────────────────────────────────────────────── */
+.wellness-tiles {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.wellness-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.75rem 0.85rem;
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+}
+
+.wellness-label {
+  font-size: 0.76rem;
+  color: var(--ink-secondary);
+}
+
+.wellness-tile strong {
+  font-size: 1.3rem;
+  font-weight: 650;
+}
+
+.wellness-delta {
+  font-size: 0.74rem;
+  color: var(--ink-muted);
+}
+
+.wellness-delta.good { color: var(--status-good-ink); }
+.wellness-delta.bad { color: var(--status-warning-ink); }
+
+.wellness-charts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.25rem;
+}
+
+/* Grid items default to min-width: auto, which would let a chart keep its first measured width and overflow. */
+.wellness-charts > div,
+.chart,
+.chart-canvas {
+  min-width: 0;
+}
+
+/* ── Maths walkthrough ─────────────────────────────────────────── */
+.math-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  font-size: 0.92rem;
+}
+
+.math-label {
+  display: inline-block;
+  min-width: 10.5rem;
+  color: var(--ink-secondary);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.highlight-row td {
+  background: var(--accent-soft);
+  font-weight: 650;
+}
+
 /* ── Charts ────────────────────────────────────────────────────── */
 .chart {
   margin-top: 0.25rem;
@@ -1161,6 +1290,10 @@ td.num {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .wellness-charts {
+    grid-template-columns: 1fr;
+  }
+
   .tab-nav {
     width: 100%;
     justify-content: flex-start;
@@ -1188,6 +1321,15 @@ td.num {
   .field-grid,
   .field-grid-4 {
     grid-template-columns: 1fr;
+  }
+
+  .wellness-tiles {
+    grid-template-columns: 1fr;
+  }
+
+  .math-label {
+    display: block;
+    min-width: 0;
   }
 
   /* Phones: tabs become an app-style bar pinned to the bottom of the screen. */

@@ -1,4 +1,4 @@
-import type { AppSettings, EWMASnapshot, SessionInput, StrengthSet } from "../types";
+import type { AppSettings, SessionInput, StrengthSet } from "../types";
 
 const DB_NAME = "boulder-load-manager";
 const DB_VERSION = 3;
@@ -91,20 +91,8 @@ export async function saveSettings(settings: AppSettings): Promise<void> {
   );
 }
 
-export async function loadEwmaSnapshots(): Promise<EWMASnapshot[]> {
-  return runTransaction<EWMASnapshot[]>(STORE_EWMA, "readonly", (store) => store.getAll());
-}
-
-export async function saveEwmaSnapshot(snapshot: EWMASnapshot): Promise<void> {
-  await runTransaction<IDBValidKey>(STORE_EWMA, "readwrite", (store) => store.put(snapshot));
-}
-
 export async function clearSessions(): Promise<void> {
   await runTransaction<undefined>(STORE_SESSIONS, "readwrite", (store) => store.clear());
-}
-
-export async function clearEwmaSnapshots(): Promise<void> {
-  await runTransaction<undefined>(STORE_EWMA, "readwrite", (store) => store.clear());
 }
 
 export async function loadStrengthSets(): Promise<StrengthSet[]> {
