@@ -2,6 +2,8 @@ import type { DriveBackupPayload } from "../types";
 
 const DRIVE_SCOPE = [
   "https://www.googleapis.com/auth/drive.file",
+  // Needed to find FitNotes exports, which another app (FitNotes / the Drive app) created.
+  "https://www.googleapis.com/auth/drive.readonly",
   "openid",
   "email",
   "profile",
@@ -206,4 +208,35 @@ export async function downloadBackupFromGoogleDrive(accessToken: string): Promis
     throw new Error("Backup payload is invalid.");
   }
   return payload;
+}
+
+export interface FitNotesDriveFile {
+  id: string;
+  name: string;
+  modifiedTime: string;
+}
+
+/** Most recently modified FitNotes CSV export anywhere in the user's Drive. */
+export async function findLatestFitNotesExport(accessToken: string): Promise<FitNotesDriveFile | undefined> {
+  const query = encodeURIComponent("name contains 'FitNotes' and trashed=false and mimeType != 'application/vnd.google-apps.folder'");
+  const response = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id,name,modifiedTime)&orderBy=modifiedTime desc&pageSize=20`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  );
+
+  if (response.status === 403) {
+    throw new Error("Google Drive denied read access. Sign out and sign in with Google again to grant it.");
+  }
+  if (!response.ok) throw new Error("Failed to search Google Drive for FitNotes exports.");
+
+  const payload = (await response.json()) as { files?: FitNotesDriveFile[] };
+  return (payload.files ?? []).find((file) => file.name.toLowerCase().endsWith(".csv"));
+}
+
+export async function downloadDriveFileText(accessToken: string, fileId: string): Promise<string> {
+  const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!response.ok) throw new Error("Failed to download file from Google Drive.");
+  return response.text();
 }

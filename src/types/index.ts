@@ -50,7 +50,9 @@ export type WallAngle = (typeof WALL_ANGLES)[number];
 
 export type EWMADays = 10 | 15 | 20 | 25;
 export type GradeDisplayUnit = "v" | "font";
-export type FiveThreeOneWeek = 1 | 2 | 3 | 4;
+export type SessionSource = "manual" | "toplogger";
+export type StrengthLoadMetric = "relative" | "volume" | "sets";
+export type TopLoggerCountMode = "attempted" | "sent";
 
 export interface ProblemEntry {
   id: string;
@@ -69,6 +71,11 @@ export interface SessionInput {
   stress: number;
   motivation: number;
   problems: ProblemEntry[];
+  source?: SessionSource;
+  /** TopLogger climb-day id for synced sessions. */
+  externalId?: string;
+  /** Set when a synced session was edited by hand, so later syncs leave it alone. */
+  locallyEdited?: boolean;
 }
 
 export interface BoulderTypeLoad {
@@ -118,12 +125,43 @@ export interface LoadModelConfig {
   showAllCombinations: boolean;
 }
 
+export interface StrengthConfig {
+  metric: StrengthLoadMetric;
+  bodyweightKg: number;
+  acuteWindow: number;
+  chronicWindow: number;
+  /** Per-exercise override of whether bodyweight is added to the logged weight. */
+  bodyweightExercises: Record<string, boolean>;
+}
+
+export interface TopLoggerConfig {
+  autoSync: boolean;
+  importFromDate: string;
+  countMode: TopLoggerCountMode;
+  defaultDurationMinutes: number;
+  lastSyncedAt?: string;
+}
+
+export interface FitNotesConfig {
+  autoSyncFromDrive: boolean;
+  lastImport?: {
+    fileName: string;
+    importedAt: string;
+    setCount: number;
+    driveFileId?: string;
+    driveModifiedTime?: string;
+  };
+}
+
 export interface AppSettings {
   climberMaxGrade: Grade;
   gradeDisplayUnit: GradeDisplayUnit;
   stressScaleMax: number;
   motivationScaleMax: number;
   model: LoadModelConfig;
+  strength: StrengthConfig;
+  toplogger: TopLoggerConfig;
+  fitnotes: FitNotesConfig;
 }
 
 export interface CalculationResult {
@@ -139,40 +177,19 @@ export interface DriveBackupPayload {
   settings: AppSettings;
   sessions: SessionInput[];
   ewmaSnapshots: EWMASnapshot[];
-  strengthTemplates?: StrengthExerciseTemplate[];
-  strengthSessions?: StrengthSession[];
+  strengthSets?: StrengthSet[];
 }
 
-export interface StrengthExerciseTemplate {
+/** One logged set, as imported from a FitNotes CSV export. */
+export interface StrengthSet {
   id: string;
-  name: string;
-  oneRepMaxKg?: number;
-  trainingMaxKg: number;
-  incrementKg: number;
-  amrapPerformedByWeek?: Partial<Record<FiveThreeOneWeek, number>>;
-  cycleNumber?: number;
-  cycleHistory?: { cycle: number; oneRepMaxKg: number }[];
-}
-
-export interface FiveThreeOneSet {
-  percentage: number;
-  reps: string;
-  targetWeightKg: number;
-}
-
-export interface StrengthExercisePlan {
-  templateId: string;
-  name: string;
-  trainingMaxKg: number;
-  sets: FiveThreeOneSet[];
-}
-
-export interface StrengthSession {
-  id: string;
-  createdAt: string;
-  sessionDate: string;
-  week: FiveThreeOneWeek;
-  exercises: StrengthExercisePlan[];
-  notes?: string;
-  cycleNumber?: number;
+  date: string;
+  exercise: string;
+  category: string;
+  weightKg: number;
+  reps: number;
+  distance?: number;
+  distanceUnit?: string;
+  timeSeconds?: number;
+  comment?: string;
 }

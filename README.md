@@ -11,7 +11,33 @@ Local-first web app for tracking bouldering load with configurable EWMA calculat
   - Speed multiplier curve.
   - Sleep penalty curve.
 - EWMA output per hold x angle combination for windows 10, 15, 20, 25.
-- Local persistence with IndexedDB (sessions, settings, EWMA snapshots).
+- Local persistence with IndexedDB (sessions, settings, EWMA snapshots, strength sets).
+- TopLogger sync: climbing days logged in TopLogger become bouldering sessions automatically.
+- Strength ACWR from FitNotes CSV exports (upload, or sync the latest export from Google Drive).
+
+## TopLogger Sync
+
+TopLogger has no public API or OAuth, and its sign-in requires reCAPTCHA, so the app connects with a refresh token
+taken from a signed-in TopLogger web session (Session tab → TopLogger Sync shows a console snippet that copies it).
+The token is kept in this browser's localStorage only and rotates on every refresh.
+
+- Requests go through `api/toplogger.ts` (a thin proxy, because TopLogger only allows CORS from app.toplogger.nu).
+  `npm run dev` uses an equivalent Vite proxy in `vite.config.ts`.
+- One session per TopLogger climb day. Grades map with TopLogger's own V-scale table, wall angle is guessed from the
+  wall name, hold type is `mixed`; duration uses the configured default and sleep the personal max.
+- Sessions you edit after syncing are marked and never overwritten by later syncs.
+- This uses TopLogger's private web-app API, so it can break if TopLogger changes it.
+
+## Strength (FitNotes)
+
+Export from FitNotes as CSV (`FitNotes_Export_*.csv`), then upload it on the Strength tab, or save it to Google Drive
+and use "Sync latest export from Google Drive" (optionally on every app start). Each import replaces all strength data.
+
+Per-set load metrics: relative intensity (reps × weight / best e1RM so far, the default), volume (kg × reps) or sets.
+Bodyweight is added for exercises marked "+BW". ACWR uses its own acute/chronic EWMA windows (default 7/28 days).
+
+Drive sync needs the `drive.readonly` scope (to see files FitNotes created). After this update, sign out and sign in
+with Google again so the new scope is granted, and add the scope to the OAuth consent screen in Google Cloud.
 
 ## Run Locally
 
@@ -112,3 +138,7 @@ Note: Vercel generates many preview URLs. Keep one stable preview URL for OAuth 
 - `src/domain/loadModelConfig.ts` - Default and clamped model configuration.
 - `src/db/indexedDb.ts` - Local database access.
 - `src/types/index.ts` - Domain models and config types.
+- `src/domain/strengthLoad.ts` - Strength set loads, daily EWMA and ACWR per exercise/category.
+- `src/integrations/toplogger.ts` - TopLogger GraphQL client and session mapping.
+- `src/integrations/fitnotes.ts` - FitNotes CSV parser.
+- `api/toplogger.ts` - Vercel proxy to TopLogger's GraphQL API.

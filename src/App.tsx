@@ -3,19 +3,14 @@ import "./App.css";
 import {
   clearEwmaSnapshots,
   clearSessions,
-  clearStrengthSessions,
-  clearStrengthTemplates,
-  deleteStrengthTemplate,
   loadEwmaSnapshots,
   loadSessions,
   loadSettings,
-  loadStrengthSessions,
-  loadStrengthTemplates,
+  loadStrengthSets,
+  replaceStrengthSets,
   saveEwmaSnapshot,
   saveSession,
   saveSettings,
-  saveStrengthSession,
-  saveStrengthTemplate,
 } from "./db/indexedDb";
 import { updateSnapshot } from "./domain/ewma";
 import { DEFAULT_SETTINGS, clampSettings } from "./domain/loadModelConfig";
@@ -31,14 +26,31 @@ import {
   suggestedCapacityRange,
   buildSessionHistory,
   buildMovingAverageSeries,
+  getAcwrZone,
   getSessionDayKey,
   type HistoryPoint,
 } from "./domain/loadCalculator";
+import { AcwrHistoryChart } from "./components/AcwrHistoryChart";
+import { NumberInput } from "./components/NumberInput";
+import { StrengthHistoryTable, StrengthTab } from "./components/StrengthTab";
+import { TopLoggerPanel } from "./components/TopLoggerPanel";
+import { parseFitNotesCsv } from "./integrations/fitnotes";
+import {
+  connectTopLogger,
+  fetchTopLoggerBoulderDays,
+  readTopLoggerAuth,
+  storeTopLoggerAuth,
+  topLoggerDayToSession,
+  TopLoggerError,
+  type TopLoggerAuth,
+} from "./integrations/toplogger";
 import {
   initiateGoogleOAuthRedirect,
   extractOAuthTokenFromUrl,
   downloadBackupFromGoogleDrive,
+  downloadDriveFileText,
   fetchGoogleProfile,
+  findLatestFitNotesExport,
   type GoogleAuthSession,
   type GoogleProfile,
   uploadBackupToGoogleDrive,
@@ -53,12 +65,9 @@ import {
   type Grade,
   type GradeDisplayUnit,
   type HoldType,
-  type FiveThreeOneSet,
-  type FiveThreeOneWeek,
   type ProblemEntry,
   type SessionInput,
-  type StrengthExerciseTemplate,
-  type StrengthSession,
+  type StrengthSet,
   type WallAngle,
 } from "./types";
 
@@ -96,80 +105,13 @@ function todayIsoDate(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+function shiftIsoDate(isoDate: string, days: number): string {
+  const date = new Date(`${isoDate}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
 const GOOGLE_SESSION_STORAGE_KEY = "blm_google_session";
-
-const DEFAULT_STRENGTH_TEMPLATE: StrengthExerciseTemplate = {
-  id: "weighted-pull-up",
-  name: "Weighted Pull-up",
-  oneRepMaxKg: 22.5,
-  trainingMaxKg: 20,
-  incrementKg: 2.5,
-};
-
-function roundToIncrement(value: number, increment: number): number {
-  const safeIncrement = Math.max(0.5, increment);
-  return Math.round(value / safeIncrement) * safeIncrement;
-}
-
-function getTemplateTrainingMax(template: StrengthExerciseTemplate): number {
-  if (typeof template.oneRepMaxKg === "number") {
-    return template.oneRepMaxKg * 0.9;
-  }
-
-  return template.trainingMaxKg;
-}
-
-function get531Prescription(week: FiveThreeOneWeek): Array<{ percentage: number; reps: string }> {
-  if (week === 1) {
-    return [
-      { percentage: 0.65, reps: "5" },
-      { percentage: 0.75, reps: "5" },
-      { percentage: 0.85, reps: "5+" },
-    ];
-  }
-
-  if (week === 2) {
-    return [
-      { percentage: 0.7, reps: "3" },
-      { percentage: 0.8, reps: "3" },
-      { percentage: 0.9, reps: "3+" },
-    ];
-  }
-
-  if (week === 3) {
-    return [
-      { percentage: 0.75, reps: "5" },
-      { percentage: 0.85, reps: "3" },
-      { percentage: 0.95, reps: "1+" },
-    ];
-  }
-
-  return [
-    { percentage: 0.4, reps: "5" },
-    { percentage: 0.5, reps: "5" },
-    { percentage: 0.6, reps: "5" },
-  ];
-}
-
-function build531Sets(trainingMaxKg: number, incrementKg: number, week: FiveThreeOneWeek): FiveThreeOneSet[] {
-  return get531Prescription(week).map((step) => ({
-    percentage: step.percentage,
-    reps: step.reps,
-    targetWeightKg: roundToIncrement(trainingMaxKg * step.percentage, incrementKg),
-  }));
-}
-
-function estimateOneRepMaxFromTopSet(
-  trainingMaxKg: number,
-  incrementKg: number,
-  week: FiveThreeOneWeek,
-): number {
-  const sets = build531Sets(trainingMaxKg, incrementKg, week);
-  const topSet = sets[sets.length - 1];
-  const repsFloor = Math.max(1, Number.parseInt(topSet.reps, 10) || 1);
-  const estimated = topSet.targetWeightKg * (1 + repsFloor / 30);
-  return roundToIncrement(estimated, incrementKg);
-}
 
 function getEwmaValue(snapshot: EWMASnapshot, windowDays: number): number {
   // For preset windows, return exact values
@@ -222,18 +164,6 @@ function getEwmaValue(snapshot: EWMASnapshot, windowDays: number): number {
   const aboveValue = presetValues[aboveIdx];
   const t = (windowDays - below) / (above - below);
   return belowValue + t * (aboveValue - belowValue);
-}
-
-function getAcwrZone(acwr: number, lowThreshold: number, highThreshold: number): string {
-  if (acwr < lowThreshold) {
-    return "Detraining";
-  }
-
-  if (acwr > highThreshold) {
-    return "High Risk";
-  }
-
-  return "Goldilocks";
 }
 
 interface CurvePoint {
@@ -334,89 +264,6 @@ function CurveChart({
         <polyline points={polyline} fill="none" stroke={stroke} strokeWidth="2.5" strokeLinecap="round" />
       </svg>
     </article>
-  );
-}
-
-function AcwrHistoryChart({
-  points,
-  lowThreshold,
-  highThreshold,
-  targetAcwr,
-}: {
-  points: HistoryPoint[];
-  lowThreshold: number;
-  highThreshold: number;
-  targetAcwr: number;
-}) {
-  const width = 600;
-  const height = 220;
-  const padL = 44;
-  const padR = 16;
-  const padT = 16;
-  const padB = 48;
-  const chartW = width - padL - padR;
-  const chartH = height - padT - padB;
-
-  const maxAcwr = Math.max(2, ...points.map((p) => p.acwr)) * 1.05;
-  const toX = (i: number) => padL + (i / (points.length - 1)) * chartW;
-  const toY = (v: number) => padT + chartH - (v / maxAcwr) * chartH;
-
-  const acwrLine = points.map((p, i) => `${toX(i)},${toY(p.acwr)}`).join(" ");
-
-  // X-axis date ticks: show ~5 labels
-  const tickIndices: number[] = [];
-  const step = Math.max(1, Math.floor(points.length / 5));
-  for (let i = 0; i < points.length; i += step) tickIndices.push(i);
-  if (tickIndices[tickIndices.length - 1] !== points.length - 1) tickIndices.push(points.length - 1);
-
-  // Y-axis ticks: 0, 0.5, 1.0, 1.5, 2.0 (up to maxAcwr)
-  const yTicks = [0, 0.5, 1.0, 1.5, 2.0].filter((v) => v <= maxAcwr);
-
-  return (
-    <svg className="acwr-history-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="ACWR history">
-      {/* Zone bands - draw from bottom to top */}
-      {/* Low zone (below low threshold) */}
-      <rect x={padL} y={toY(lowThreshold)} width={chartW} height={Math.max(0, padT + chartH - toY(lowThreshold))} fill="#f59e0b" opacity="0.10" />
-      {/* Green zone (between thresholds) */}
-      <rect x={padL} y={toY(highThreshold)} width={chartW} height={Math.max(0, toY(lowThreshold) - toY(highThreshold))} fill="#22c55e" opacity="0.12" />
-      {/* High zone (above high threshold) */}
-      <rect x={padL} y={padT} width={chartW} height={Math.max(0, toY(highThreshold) - padT)} fill="#ef4444" opacity="0.10" />
-      {/* Grid + threshold lines */}
-      {yTicks.map((v) => (
-        <line key={v} x1={padL} y1={toY(v)} x2={padL + chartW} y2={toY(v)} stroke="currentColor" strokeOpacity="0.1" strokeWidth="1" />
-      ))}
-      <line x1={padL} y1={toY(lowThreshold)} x2={padL + chartW} y2={toY(lowThreshold)} stroke="#f59e0b" strokeOpacity="0.5" strokeWidth="1" strokeDasharray="4,3" />
-      <line x1={padL} y1={toY(highThreshold)} x2={padL + chartW} y2={toY(highThreshold)} stroke="#ef4444" strokeOpacity="0.5" strokeWidth="1" strokeDasharray="4,3" />
-      <line x1={padL} y1={toY(targetAcwr)} x2={padL + chartW} y2={toY(targetAcwr)} stroke="#3b82f6" strokeOpacity="0.7" strokeWidth="1.5" strokeDasharray="6,3" />
-      {/* Axes */}
-      <line x1={padL} y1={padT} x2={padL} y2={padT + chartH} stroke="currentColor" strokeOpacity="0.3" strokeWidth="1" />
-      <line x1={padL} y1={padT + chartH} x2={padL + chartW} y2={padT + chartH} stroke="currentColor" strokeOpacity="0.3" strokeWidth="1" />
-      {/* Y ticks */}
-      {yTicks.map((v) => (
-        <text key={v} x={padL - 6} y={toY(v) + 4} textAnchor="end" fontSize="10" fill="currentColor" opacity="0.6">{v.toFixed(1)}</text>
-      ))}
-      {/* X ticks */}
-      {tickIndices.map((i) => (
-        <text key={i} x={toX(i)} y={padT + chartH + 14} textAnchor="middle" fontSize="9" fill="currentColor" opacity="0.6">
-          {points[i].date.slice(5)}
-        </text>
-      ))}
-      {/* ACWR line */}
-      <polyline points={acwrLine} fill="none" stroke="#6366f1" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-      {/* Dots for each session */}
-      {points.map((p, i) => (
-        <circle key={i} cx={toX(i)} cy={toY(p.acwr)} r="3" fill="#6366f1" opacity="0.75" />
-      ))}
-      {/* Axis labels */}
-      <text x={padL + chartW / 2} y={height - 4} textAnchor="middle" fontSize="10" fill="currentColor" opacity="0.7">Date</text>
-      <text x={10} y={padT + chartH / 2} textAnchor="middle" fontSize="10" fill="currentColor" opacity="0.7"
-        transform={`rotate(-90, 10, ${padT + chartH / 2})`}>ACWR</text>
-      {/* Legend */}
-      <line x1={padL + chartW - 110} y1={12} x2={padL + chartW - 95} y2={12} stroke="#6366f1" strokeWidth="2" />
-      <text x={padL + chartW - 92} y={16} fontSize="9" fill="currentColor" opacity="0.7">ACWR</text>
-      <line x1={padL + chartW - 60} y1={12} x2={padL + chartW - 45} y2={12} stroke="#3b82f6" strokeWidth="1.5" strokeDasharray="4,2" />
-      <text x={padL + chartW - 42} y={16} fontSize="9" fill="currentColor" opacity="0.7">Target</text>
-    </svg>
   );
 }
 
@@ -574,67 +421,6 @@ function EwmaWeightsChart() {
   );
 }
 
-interface NumberInputProps {
-  value: number;
-  onCommit: (value: number) => void;
-  min?: number;
-  max?: number;
-  step?: number;
-}
-
-function NumberInput({ value, onCommit, min, max, step }: NumberInputProps) {
-  const [text, setText] = useState<string>(String(value));
-
-  useEffect(() => {
-    setText(String(value));
-  }, [value]);
-
-  function commitValue() {
-    if (text.trim() === "") {
-      setText(String(value));
-      return;
-    }
-
-    const parsed = Number(text);
-    if (Number.isNaN(parsed)) {
-      setText(String(value));
-      return;
-    }
-
-    let next = parsed;
-    if (typeof min === "number") {
-      next = Math.max(min, next);
-    }
-    if (typeof max === "number") {
-      next = Math.min(max, next);
-    }
-
-    onCommit(next);
-    setText(String(next));
-  }
-
-  return (
-    <input
-      type="number"
-      min={min}
-      max={max}
-      step={step}
-      value={text}
-      onChange={(event) => setText(event.target.value)}
-      onBlur={commitValue}
-      onKeyDown={(event) => {
-        if (event.key === "Enter") {
-          commitValue();
-        }
-
-        if (event.key === "Escape") {
-          setText(String(value));
-        }
-      }}
-    />
-  );
-}
-
 function App() {
   const [tab, setTab] = useState<TabName>(() => {
     const saved = localStorage.getItem("blm_tab");
@@ -642,13 +428,11 @@ function App() {
   });
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [sessions, setSessions] = useState<SessionInput[]>([]);
-  const [strengthTemplates, setStrengthTemplates] = useState<StrengthExerciseTemplate[]>([]);
-  const [strengthSessions, setStrengthSessions] = useState<StrengthSession[]>([]);
-  const [selectedStrengthTemplateId, setSelectedStrengthTemplateId] = useState<string | undefined>();
-  const [amrapDraftByTemplateWeek, setAmrapDraftByTemplateWeek] = useState<Record<string, string>>({});
-  const [editingStrengthSessionId, setEditingStrengthSessionId] = useState<string | undefined>();
-  const [editingStrengthSessionCreatedAt, setEditingStrengthSessionCreatedAt] = useState<string | undefined>();
-  const [editingStrengthExercises, setEditingStrengthExercises] = useState<StrengthSession["exercises"]>([]);
+  const [strengthSets, setStrengthSets] = useState<StrengthSet[]>([]);
+  const [fitnotesSyncing, setFitnotesSyncing] = useState(false);
+  const [toploggerAuth, setToploggerAuth] = useState<TopLoggerAuth | undefined>(() => readTopLoggerAuth());
+  const [toploggerStatus, setToploggerStatus] = useState<string | undefined>();
+  const [toploggerSyncing, setToploggerSyncing] = useState(false);
   const [ewmaSnapshots, setEwmaSnapshots] = useState<Record<string, EWMASnapshot>>({});
   const [draft, setDraft] = useState<SessionDraft>(createSessionDraft(DEFAULT_SETTINGS));
   const [editingSessionId, setEditingSessionId] = useState<string | undefined>();
@@ -691,12 +475,6 @@ function App() {
   const [entryHold, setEntryHold] = useState<HoldType>("mixed");
   const [entryAngle, setEntryAngle] = useState<WallAngle>("vert");
   const [entryDate, setEntryDate] = useState<string>(todayIsoDate());
-  const [strengthWeek, setStrengthWeek] = useState<FiveThreeOneWeek>(1);
-  const [strengthDate, setStrengthDate] = useState<string>(todayIsoDate());
-  const [strengthNotes, setStrengthNotes] = useState<string>("");
-  const [templateName, setTemplateName] = useState<string>("");
-  const [templateOneRepMax, setTemplateOneRepMax] = useState<number>(22.5);
-  const [templateIncrement, setTemplateIncrement] = useState<number>(2.5);
   const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
 
   function storeDriveSession(session: GoogleAuthSession | undefined): void {
@@ -1052,12 +830,11 @@ function App() {
 
   useEffect(() => {
     async function bootstrap() {
-      const [savedSettings, savedSessions, savedSnapshots, savedTemplates, savedStrengthSessions] = await Promise.all([
+      const [savedSettings, savedSessions, savedSnapshots, savedStrengthSets] = await Promise.all([
         loadSettings(),
         loadSessions(),
         loadEwmaSnapshots(),
-        loadStrengthTemplates(),
-        loadStrengthSessions(),
+        loadStrengthSets(),
       ]);
 
       const nextSettings = clampSettings(savedSettings ?? DEFAULT_SETTINGS);
@@ -1071,17 +848,11 @@ function App() {
       }, {});
       setEwmaSnapshots(mapped);
 
-      if (savedTemplates.length === 0) {
-        await saveStrengthTemplate(DEFAULT_STRENGTH_TEMPLATE);
-        setStrengthTemplates([DEFAULT_STRENGTH_TEMPLATE]);
-      } else {
-        setStrengthTemplates(savedTemplates);
-      }
-
-      setStrengthSessions(savedStrengthSessions);
+      setStrengthSets(savedStrengthSets);
 
       // Check if Google redirected back with a code (or error) in the URL query.
       let redirectSession: GoogleAuthSession | null = null;
+      let activeDriveToken: string | undefined;
       try {
         const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
         if (clientId) {
@@ -1100,6 +871,7 @@ function App() {
           setDriveSession(redirectSession);
           setGoogleProfile(profile);
           storeDriveSession(redirectSession);
+          activeDriveToken = redirectSession.accessToken;
               if (savedSessions.length === 0) {
                 setDriveStatus(`Signed in as ${profile.email}. Restoring backup…`);
                 addDriveLog("No local data — restoring from Drive…");
@@ -1122,6 +894,7 @@ function App() {
             const profile = await fetchGoogleProfile(existingDriveSession.accessToken);
             setDriveSession(existingDriveSession);
             setGoogleProfile(profile);
+            activeDriveToken = existingDriveSession.accessToken;
             if (savedSessions.length === 0) {
               setDriveStatus(`Signed in as ${profile.email}. Restoring backup…`);
               await applyDriveBackup(existingDriveSession.accessToken);
@@ -1139,6 +912,15 @@ function App() {
       }
 
       setLoading(false);
+
+      // Background syncs run after first render so the app is usable while they load.
+      const storedTopLoggerAuth = readTopLoggerAuth();
+      if (storedTopLoggerAuth && nextSettings.toplogger.autoSync) {
+        void syncTopLogger(storedTopLoggerAuth, nextSettings);
+      }
+      if (activeDriveToken && nextSettings.fitnotes.autoSyncFromDrive) {
+        void syncFitNotesFromDrive(activeDriveToken, nextSettings, true);
+      }
     }
 
     void bootstrap();
@@ -1182,141 +964,6 @@ function App() {
       update(next);
       return clampSettings(next);
     });
-  }
-
-  async function addStrengthTemplate(): Promise<void> {
-    const name = templateName.trim();
-    if (!name) {
-      return;
-    }
-
-    const template: StrengthExerciseTemplate = {
-      id: getId(),
-      name,
-      oneRepMaxKg: Math.max(1, templateOneRepMax),
-      trainingMaxKg: roundToIncrement(Math.max(1, templateOneRepMax) * 0.9, Math.max(0.5, templateIncrement)),
-      incrementKg: Math.max(0.5, templateIncrement),
-    };
-
-    await saveStrengthTemplate(template);
-    setStrengthTemplates((previous) => [...previous, template].sort((a, b) => a.name.localeCompare(b.name)));
-    setTemplateName("");
-  }
-
-  async function removeStrengthTemplate(templateId: string): Promise<void> {
-    await deleteStrengthTemplate(templateId);
-    setStrengthTemplates((previous) => previous.filter((item) => item.id !== templateId));
-  }
-
-  async function advanceCycle(templateId: string): Promise<void> {
-    const template = strengthTemplates.find((t) => t.id === templateId);
-    if (!template) return;
-    const currentCycle = template.cycleNumber ?? 1;
-    const currentOneRepMax = template.oneRepMaxKg ?? template.trainingMaxKg / 0.9;
-    const newOneRepMax = currentOneRepMax + template.incrementKg;
-    const updated: StrengthExerciseTemplate = {
-      ...template,
-      cycleNumber: currentCycle + 1,
-      cycleHistory: [...(template.cycleHistory ?? []), { cycle: currentCycle, oneRepMaxKg: currentOneRepMax }],
-      oneRepMaxKg: newOneRepMax,
-      trainingMaxKg: newOneRepMax * 0.9,
-    };
-    await saveStrengthTemplate(updated);
-    setStrengthTemplates((prev) => prev.map((t) => (t.id === templateId ? updated : t)));
-  }
-
-  function getTemplateWeekKey(templateId: string, week: FiveThreeOneWeek): string {
-    return `${templateId}-${week}`;
-  }
-
-  async function saveAmrapPerformed(templateId: string, week: FiveThreeOneWeek): Promise<void> {
-    const key = getTemplateWeekKey(templateId, week);
-    const rawValue = amrapDraftByTemplateWeek[key] ?? "";
-    const parsed = Number(rawValue);
-
-    if (!Number.isFinite(parsed) || parsed < 0) {
-      return;
-    }
-
-    const reps = Math.round(parsed);
-
-    const targetTemplate = strengthTemplates.find((item) => item.id === templateId);
-    if (!targetTemplate) {
-      return;
-    }
-
-    const updatedTemplate: StrengthExerciseTemplate = {
-      ...targetTemplate,
-      amrapPerformedByWeek: {
-        ...(targetTemplate.amrapPerformedByWeek ?? {}),
-        [week]: reps,
-      },
-    };
-
-    await saveStrengthTemplate(updatedTemplate);
-    setStrengthTemplates((previous) =>
-      previous.map((item) => (item.id === templateId ? updatedTemplate : item)).sort((a, b) => a.name.localeCompare(b.name)),
-    );
-    setAmrapDraftByTemplateWeek((previous) => ({
-      ...previous,
-      [key]: String(reps),
-    }));
-  }
-
-  async function saveStrengthProtocolSession(): Promise<void> {
-    if (strengthTemplates.length === 0 && !editingStrengthSessionId) {
-      return;
-    }
-
-    const exercises = editingStrengthSessionId
-      ? editingStrengthExercises
-      : strengthTemplates.map((template) => ({
-          templateId: template.id,
-          name: template.name,
-          trainingMaxKg: getTemplateTrainingMax(template),
-          sets: build531Sets(getTemplateTrainingMax(template), template.incrementKg, strengthWeek),
-        }));
-
-    const session: StrengthSession = {
-      id: editingStrengthSessionId ?? getId(),
-      createdAt: editingStrengthSessionCreatedAt ?? new Date().toISOString(),
-      sessionDate: strengthDate,
-      week: strengthWeek,
-      exercises,
-      notes: strengthNotes.trim() || undefined,
-      cycleNumber: strengthTemplates[0]?.cycleNumber ?? 1,
-    };
-
-    await saveStrengthSession(session);
-    setStrengthSessions((previous) => {
-      const updated = editingStrengthSessionId
-        ? previous.map((item) => (item.id === session.id ? session : item))
-        : [session, ...previous];
-      return updated.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-    });
-    setStrengthNotes("");
-    setEditingStrengthSessionId(undefined);
-    setEditingStrengthSessionCreatedAt(undefined);
-    setEditingStrengthExercises([]);
-  }
-
-  function beginEditStrengthSession(session: StrengthSession): void {
-    setEditingStrengthSessionId(session.id);
-    setEditingStrengthSessionCreatedAt(session.createdAt);
-    setEditingStrengthExercises(session.exercises.map((exercise) => ({ ...exercise, sets: exercise.sets.map((set) => ({ ...set })) })));
-    setStrengthDate(session.sessionDate);
-    setStrengthWeek(session.week);
-    setStrengthNotes(session.notes ?? "");
-    setTabAndPersist("strength");
-  }
-
-  function cancelEditStrengthSession(): void {
-    setEditingStrengthSessionId(undefined);
-    setEditingStrengthSessionCreatedAt(undefined);
-    setEditingStrengthExercises([]);
-    setStrengthDate(todayIsoDate());
-    setStrengthWeek(1);
-    setStrengthNotes("");
   }
 
   function beginEditSession(session: SessionInput): void {
@@ -1425,8 +1072,7 @@ function App() {
       settings,
       sessions,
       ewmaSnapshots: Object.values(ewmaSnapshots),
-      strengthTemplates,
-      strengthSessions,
+      strengthSets,
     };
   }
 
@@ -1461,21 +1107,6 @@ function App() {
     downloadBlob(rows.join("\n"), `bouldering-sessions-${new Date().toISOString().slice(0,10)}.csv`, "text/csv");
   }
 
-  function exportStrengthToCSV(): void {
-    const header = "sessionId,createdAt,sessionDate,week,cycleNumber,exerciseName,templateId,trainingMaxKg,setIndex,percentage,reps,targetWeightKg,amrapPerformed";
-    const rows: string[] = [header];
-    for (const s of strengthSessions) {
-      const cycle = s.cycleNumber ?? 1;
-      for (const ex of s.exercises) {
-        ex.sets.forEach((set, idx) => {
-          const amrap = (strengthTemplates.find((t) => t.id === ex.templateId)?.amrapPerformedByWeek?.[s.week]) ?? "";
-          rows.push([s.id, s.createdAt, s.sessionDate, s.week, cycle, ex.name, ex.templateId, ex.trainingMaxKg, idx + 1, set.percentage, set.reps, set.targetWeightKg, idx === ex.sets.length - 1 ? amrap : ""].join(","));
-        });
-      }
-    }
-    downloadBlob(rows.join("\n"), `strength-sessions-${new Date().toISOString().slice(0,10)}.csv`, "text/csv");
-  }
-
   async function importBackupFromJSON(file: File): Promise<void> {
     try {
       const text = await file.text();
@@ -1483,18 +1114,15 @@ function App() {
       
       await clearSessions();
       await clearEwmaSnapshots();
-      await clearStrengthTemplates();
-      await clearStrengthSessions();
 
       const restoredSettings = clampSettings(payload.settings ?? DEFAULT_SETTINGS);
       await saveSettings(restoredSettings);
       for (const s of payload.sessions) { await saveSession(s); }
       for (const snap of payload.ewmaSnapshots ?? []) { await saveEwmaSnapshot(snap); }
-      for (const t of payload.strengthTemplates ?? [DEFAULT_STRENGTH_TEMPLATE]) { await saveStrengthTemplate(t); }
-      for (const ss of payload.strengthSessions ?? []) { await saveStrengthSession(ss); }
+      if (payload.strengthSets) { await replaceStrengthSets(payload.strengthSets); }
 
-      const [sessionsFromDb, snapshotsFromDb, templatesFromDb, strengthSessionsFromDb] = await Promise.all([
-        loadSessions(), loadEwmaSnapshots(), loadStrengthTemplates(), loadStrengthSessions(),
+      const [sessionsFromDb, snapshotsFromDb, strengthSetsFromDb] = await Promise.all([
+        loadSessions(), loadEwmaSnapshots(), loadStrengthSets(),
       ]);
       const mappedSnapshots = snapshotsFromDb.reduce<Record<string, EWMASnapshot>>((acc, snap) => {
         acc[snap.key] = snap;
@@ -1504,8 +1132,7 @@ function App() {
       setSettings(restoredSettings);
       setSessions(sessionsFromDb);
       setEwmaSnapshots(mappedSnapshots);
-      setStrengthTemplates(templatesFromDb.length > 0 ? templatesFromDb : [DEFAULT_STRENGTH_TEMPLATE]);
-      setStrengthSessions(strengthSessionsFromDb);
+      setStrengthSets(strengthSetsFromDb);
       setDraft(createSessionDraft(restoredSettings));
       addDriveLog("Backup imported successfully!");
     } catch (err) {
@@ -1538,53 +1165,20 @@ function App() {
     setSessions(updated.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()));
   }
 
-  async function importStrengthFromCSV(file: File): Promise<void> {
-    const text = await file.text();
-    const lines = text.split("\n").filter((l) => l.trim());
-    if (lines.length < 2) return;
-    const sessionMap = new Map<string, StrengthSession>();
-    for (const line of lines.slice(1)) {
-      const cols = line.split(",");
-      const [sid, createdAt, sessionDate, week, cycleNumber, exerciseName, templateId, trainingMaxKg, setIndex, percentage, reps, targetWeightKg, amrapPerformed] = cols;
-      if (!sid) continue;
-      if (!sessionMap.has(sid)) {
-        sessionMap.set(sid, { id: sid, createdAt, sessionDate, week: Number(week) as FiveThreeOneWeek, cycleNumber: Number(cycleNumber) || 1, exercises: [], notes: undefined });
-      }
-      const sess = sessionMap.get(sid)!;
-      let ex = sess.exercises.find((e) => e.templateId === templateId);
-      if (!ex) {
-        ex = { templateId, name: exerciseName, trainingMaxKg: Number(trainingMaxKg), sets: [] };
-        sess.exercises.push(ex);
-      }
-      ex.sets[Number(setIndex) - 1] = { percentage: Number(percentage), reps, targetWeightKg: Number(targetWeightKg) };
-      if (amrapPerformed && Number(setIndex) === ex.sets.length + 1) {
-        // Will be added to amrap on template if needed
-      }
-    }
-    for (const session of sessionMap.values()) {
-      await saveStrengthSession(session);
-    }
-    const updated = await loadStrengthSessions();
-    setStrengthSessions(updated);
-  }
-
   async function applyDriveBackup(token: string): Promise<void> {
     try {
       const payload = await downloadBackupFromGoogleDrive(token);
       await clearSessions();
       await clearEwmaSnapshots();
-      await clearStrengthTemplates();
-      await clearStrengthSessions();
 
       const restoredSettings = clampSettings(payload.settings ?? DEFAULT_SETTINGS);
       await saveSettings(restoredSettings);
       for (const s of payload.sessions) { await saveSession(s); }
       for (const snap of payload.ewmaSnapshots ?? []) { await saveEwmaSnapshot(snap); }
-      for (const t of payload.strengthTemplates ?? [DEFAULT_STRENGTH_TEMPLATE]) { await saveStrengthTemplate(t); }
-      for (const ss of payload.strengthSessions ?? []) { await saveStrengthSession(ss); }
+      if (payload.strengthSets) { await replaceStrengthSets(payload.strengthSets); }
 
-      const [sessionsFromDb, snapshotsFromDb, templatesFromDb, strengthSessionsFromDb] = await Promise.all([
-        loadSessions(), loadEwmaSnapshots(), loadStrengthTemplates(), loadStrengthSessions(),
+      const [sessionsFromDb, snapshotsFromDb, strengthSetsFromDb] = await Promise.all([
+        loadSessions(), loadEwmaSnapshots(), loadStrengthSets(),
       ]);
       const mappedSnapshots = snapshotsFromDb.reduce<Record<string, EWMASnapshot>>((acc, snap) => {
         acc[snap.key] = snap;
@@ -1594,8 +1188,7 @@ function App() {
       setSettings(restoredSettings);
       setSessions(sessionsFromDb);
       setEwmaSnapshots(mappedSnapshots);
-      setStrengthTemplates(templatesFromDb.length > 0 ? templatesFromDb : [DEFAULT_STRENGTH_TEMPLATE]);
-      setStrengthSessions(strengthSessionsFromDb);
+      setStrengthSets(strengthSetsFromDb);
       setDraft(createSessionDraft(restoredSettings));
     } catch {
       // No backup file yet — that's fine, just continue with local data.
@@ -1696,6 +1289,172 @@ function App() {
     }
   }
 
+  function problemsSignature(problems: ProblemEntry[]): string {
+    return problems.map((problem) => `${problem.grade}|${problem.wallAngle}|${problem.count}`).sort().join(",");
+  }
+
+  async function syncTopLogger(auth: TopLoggerAuth, settingsForSync: AppSettings): Promise<void> {
+    setToploggerSyncing(true);
+    setToploggerStatus("Syncing TopLogger…");
+
+    try {
+      const { importFromDate, lastSyncedAt } = settingsForSync.toplogger;
+      // Re-check a few days before the last sync to catch climbs logged late.
+      const lastSyncedDay = lastSyncedAt ? shiftIsoDate(lastSyncedAt.slice(0, 10), -3) : undefined;
+      const since = lastSyncedDay && lastSyncedDay > importFromDate ? lastSyncedDay : importFromDate;
+
+      const { auth: nextAuth, days } = await fetchTopLoggerBoulderDays(auth, since);
+      setToploggerAuth(nextAuth);
+
+      const sessionsById = new Map((await loadSessions()).map((item) => [item.id, item]));
+      let added = 0;
+      let updated = 0;
+
+      for (const day of days) {
+        const synced = topLoggerDayToSession(day, settingsForSync);
+        if (!synced) continue;
+
+        const existing = sessionsById.get(synced.id);
+        if (existing?.locallyEdited) continue;
+
+        if (existing) {
+          if (problemsSignature(existing.problems) === problemsSignature(synced.problems)) continue;
+          const merged: SessionInput = {
+            ...synced,
+            durationMinutes: existing.durationMinutes,
+            sleepHours: existing.sleepHours,
+            stress: existing.stress,
+            motivation: existing.motivation,
+          };
+          await saveSession(merged);
+          sessionsById.set(merged.id, merged);
+          updated++;
+        } else {
+          await saveSession(synced);
+          sessionsById.set(synced.id, synced);
+          added++;
+        }
+      }
+
+      if (added + updated > 0) {
+        const allSessions = Array.from(sessionsById.values());
+        const recalculatedSnapshots = await recomputeAndPersistSnapshots(allSessions, settingsForSync);
+        setEwmaSnapshots(recalculatedSnapshots);
+        setSessions(allSessions.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()));
+      }
+
+      setSettings((previous) =>
+        clampSettings({ ...previous, toplogger: { ...previous.toplogger, lastSyncedAt: new Date().toISOString() } }),
+      );
+      setToploggerStatus(`TopLogger: checked ${days.length} climbing days since ${since}: ${added} new, ${updated} updated.`);
+      if (added + updated > 0) {
+        showNotification(`TopLogger sync: ${added} new, ${updated} updated sessions.`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (error instanceof TopLoggerError && (error.code === "UNAUTHENTICATED" || /jwt|token/i.test(message))) {
+        storeTopLoggerAuth(undefined);
+        setToploggerAuth(undefined);
+        setToploggerStatus(`TopLogger session expired or revoked (${message}). Paste a new refresh token to reconnect.`);
+      } else {
+        setToploggerStatus(`TopLogger sync failed: ${message}`);
+      }
+    } finally {
+      setToploggerSyncing(false);
+    }
+  }
+
+  async function handleTopLoggerConnect(refreshToken: string): Promise<void> {
+    setToploggerSyncing(true);
+    setToploggerStatus("Connecting to TopLogger…");
+
+    let auth: TopLoggerAuth;
+    try {
+      auth = await connectTopLogger(refreshToken);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setToploggerStatus(`Could not connect to TopLogger: ${message}`);
+      setToploggerSyncing(false);
+      return;
+    }
+
+    setToploggerAuth(auth);
+    await syncTopLogger(auth, settings);
+  }
+
+  function handleTopLoggerDisconnect(): void {
+    storeTopLoggerAuth(undefined);
+    setToploggerAuth(undefined);
+    setToploggerStatus("TopLogger disconnected. Synced sessions stay in your history.");
+  }
+
+  async function applyFitNotesExport(
+    text: string,
+    source: { fileName: string; driveFileId?: string; driveModifiedTime?: string },
+  ): Promise<void> {
+    const { sets, skippedRows } = parseFitNotesCsv(text);
+    if (sets.length === 0) {
+      throw new Error("No sets found in this export.");
+    }
+
+    await replaceStrengthSets(sets);
+    setStrengthSets(sets);
+    setSettings((previous) =>
+      clampSettings({
+        ...previous,
+        fitnotes: {
+          ...previous.fitnotes,
+          lastImport: { ...source, importedAt: new Date().toISOString(), setCount: sets.length },
+        },
+      }),
+    );
+    showNotification(
+      `Imported ${sets.length} sets from ${source.fileName}${skippedRows > 0 ? ` (${skippedRows} rows skipped)` : ""}.`,
+    );
+  }
+
+  async function importFitNotesFile(file: File): Promise<void> {
+    try {
+      await applyFitNotesExport(await file.text(), { fileName: file.name });
+    } catch (error) {
+      showNotification(`FitNotes import failed: ${error instanceof Error ? error.message : String(error)}`, 6000);
+    }
+  }
+
+  async function syncFitNotesFromDrive(token: string, settingsForSync: AppSettings, onlyIfChanged: boolean): Promise<void> {
+    setFitnotesSyncing(true);
+
+    try {
+      const file = await findLatestFitNotesExport(token);
+      if (!file) {
+        if (!onlyIfChanged) showNotification("No FitNotes CSV export found in Google Drive.");
+        return;
+      }
+
+      const lastImport = settingsForSync.fitnotes.lastImport;
+      if (onlyIfChanged && lastImport?.driveFileId === file.id && lastImport.driveModifiedTime === file.modifiedTime) {
+        return;
+      }
+
+      const text = await downloadDriveFileText(token, file.id);
+      await applyFitNotesExport(text, { fileName: file.name, driveFileId: file.id, driveModifiedTime: file.modifiedTime });
+    } catch (error) {
+      showNotification(`FitNotes Drive sync failed: ${error instanceof Error ? error.message : String(error)}`, 6000);
+    } finally {
+      setFitnotesSyncing(false);
+    }
+  }
+
+  function handleFitNotesDriveSync(): void {
+    const token = ensureDriveAccessToken();
+    if (!token) {
+      showNotification("Google sign-in expired — please sign in again.");
+      return;
+    }
+
+    void syncFitNotesFromDrive(token, settings, false);
+  }
+
   async function saveCurrentSession(): Promise<void> {
     if (draft.problems.length === 0) {
       return;
@@ -1706,6 +1465,7 @@ function App() {
     // Convert session date (YYYY-MM-DD) to ISO timestamp at noon UTC
     const sessionDateIso = `${draft.sessionDate}T12:00:00Z`;
 
+    const original = isEditing ? sessions.find((item) => item.id === editingSessionId) : undefined;
     const session: SessionInput = {
       id: editingSessionId ?? getId(),
       createdAt: editingSessionCreatedAt ?? sessionDateIso,
@@ -1714,6 +1474,9 @@ function App() {
       stress: draft.stress,
       motivation: draft.motivation,
       problems: draft.problems,
+      source: original?.source ?? "manual",
+      externalId: original?.externalId,
+      locallyEdited: original?.source === "toplogger" ? true : undefined,
     };
 
     const highestLoggedGrade = session.problems.reduce((max, item) => {
@@ -1833,6 +1596,18 @@ function App() {
 
       {tab === "session" && (
         <section className="panel-grid">
+          <TopLoggerPanel
+            settings={settings}
+            patchSettings={patchSettings}
+            auth={toploggerAuth}
+            status={toploggerStatus}
+            syncing={toploggerSyncing}
+            onConnect={(refreshToken) => void handleTopLoggerConnect(refreshToken)}
+            onDisconnect={handleTopLoggerDisconnect}
+            onSync={() => {
+              if (toploggerAuth) void syncTopLogger(toploggerAuth, settings);
+            }}
+          />
           <article className="panel">
             <h2>Quick Problem Entry</h2>
             <div className="field-grid">
@@ -2259,240 +2034,15 @@ function App() {
       )}
 
       {tab === "strength" && (
-        <section className="panel-grid">
-          <article className="panel">
-            <h2>5/3/1 Planner</h2>
-            <p>
-              Standard 5/3/1 math: training max = 90% of true 1RM. Week presets: 1 (5s), 2 (3s), 3 (5/3/1), 4 (deload).
-            </p>
-            {editingStrengthSessionId && (
-              <p>
-                Editing strength session from history. Save will update that entry.
-              </p>
-            )}
-            <div className="field-grid">
-              <label>
-                Week
-                <select value={strengthWeek} onChange={(event) => setStrengthWeek(Number(event.target.value) as FiveThreeOneWeek)}>
-                  <option value={1}>Week 1 - 5/5/5+</option>
-                  <option value={2}>Week 2 - 3/3/3+</option>
-                  <option value={3}>Week 3 - 5/3/1+</option>
-                  <option value={4}>Week 4 - Deload</option>
-                </select>
-              </label>
-              <label>
-                Session date
-                <input type="date" value={strengthDate} onChange={(event) => setStrengthDate(event.target.value)} />
-              </label>
-            </div>
-            <label>
-              Notes
-              <input value={strengthNotes} onChange={(event) => setStrengthNotes(event.target.value)} placeholder="Optional notes for this strength day" />
-            </label>
-            <div className="metric-row">
-              <button type="button" onClick={() => void saveStrengthProtocolSession()} disabled={strengthTemplates.length === 0 && !editingStrengthSessionId}>
-                {editingStrengthSessionId ? "Update Strength Session" : "Save Strength Session"}
-              </button>
-              {editingStrengthSessionId && (
-                <button type="button" onClick={cancelEditStrengthSession}>
-                  Cancel Edit
-                </button>
-              )}
-            </div>
-          </article>
-
-          <article className="panel">
-            <h2>How 5/3/1 Works</h2>
-            <p>
-              5/3/1 was created by Jim Wendler as a simple long-term strength progression system built around submaximal work and steady progress.
-            </p>
-            <p>
-              Step 1: set a conservative training max at 90% of true 1RM.
-            </p>
-            <p>
-              Step 2: follow weekly waves (5s, 3s, 5/3/1, deload).
-            </p>
-            <p>
-              Step 3: aim to beat minimum reps on the final + set while keeping form strict.
-            </p>
-            <p>
-              Step 4: increase your training max next cycle and repeat.
-            </p>
-          </article>
-
-          <article className="panel">
-            <h2>Exercise Templates</h2>
-            <p>
-              Start with Weighted Pull-up by default, then add your own lifts.
-            </p>
-            <div className="field-grid">
-              <label>
-                Exercise name
-                <input value={templateName} onChange={(event) => setTemplateName(event.target.value)} placeholder="e.g. Front Squat" />
-              </label>
-              <label>
-                True 1RM (kg)
-                <NumberInput value={templateOneRepMax} min={1} step={0.5} onCommit={setTemplateOneRepMax} />
-              </label>
-              <label>
-                Plate increment (kg)
-                <NumberInput value={templateIncrement} min={0.5} step={0.5} onCommit={setTemplateIncrement} />
-              </label>
-            </div>
-            <button type="button" onClick={() => void addStrengthTemplate()}>
-              Add Exercise
-            </button>
-
-            {strengthTemplates.length > 0 && (
-              <table>
-                <thead>
-                  <tr>
-                    <th>Exercise</th>
-                    <th>Cycle</th>
-                    <th>1RM</th>
-                    <th>TM</th>
-                    <th>Est. current 1RM</th>
-                    <th>Increment</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {strengthTemplates.map((template) => {
-                    const tm = getTemplateTrainingMax(template);
-                    const estimatedCurrentOneRepMax = estimateOneRepMaxFromTopSet(tm, template.incrementKg, strengthWeek);
-                    const cycle = template.cycleNumber ?? 1;
-                    return (
-                      <tr key={template.id}>
-                        <td>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSelectedStrengthTemplateId((previous) =>
-                                previous === template.id ? undefined : template.id,
-                              );
-                              setAmrapDraftByTemplateWeek((previous) => {
-                                const next = { ...previous };
-                                for (const weekValue of [1, 2, 3, 4] as FiveThreeOneWeek[]) {
-                                  const key = getTemplateWeekKey(template.id, weekValue);
-                                  if (next[key] === undefined) {
-                                    const saved = template.amrapPerformedByWeek?.[weekValue];
-                                    next[key] = typeof saved === "number" ? String(saved) : "";
-                                  }
-                                }
-                                return next;
-                              });
-                            }}
-                          >
-                            {template.name}
-                          </button>
-                        </td>
-                        <td>
-                          <span className="cycle-badge">Cycle {cycle}</span>
-                        </td>
-                        <td>{(template.oneRepMaxKg ?? template.trainingMaxKg / 0.9).toFixed(1)} kg</td>
-                        <td>{tm.toFixed(1)} kg</td>
-                        <td>{estimatedCurrentOneRepMax.toFixed(1)} kg</td>
-                        <td>{template.incrementKg.toFixed(1)} kg</td>
-                        <td>
-                          <button
-                            type="button"
-                            className="advance-cycle-btn"
-                            title={`Start cycle ${cycle + 1}: 1RM → ${((template.oneRepMaxKg ?? template.trainingMaxKg / 0.9) + template.incrementKg).toFixed(1)} kg`}
-                            onClick={() => {
-                              if (window.confirm(`Advance ${template.name} to Cycle ${cycle + 1}?\n\n1RM: ${(template.oneRepMaxKg ?? template.trainingMaxKg / 0.9).toFixed(1)} kg → ${((template.oneRepMaxKg ?? template.trainingMaxKg / 0.9) + template.incrementKg).toFixed(1)} kg (+${template.incrementKg} kg)`)) {
-                                void advanceCycle(template.id);
-                              }
-                            }}
-                          >
-                            ↑ Advance cycle
-                          </button>
-                          <button type="button" className="danger" onClick={() => void removeStrengthTemplate(template.id)}>
-                            Remove
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            )}
-          </article>
-
-          <article className="panel full-width">
-            <h2>Next 4 Weeks Plan</h2>
-            {!selectedStrengthTemplateId && <p>Click an exercise name above to open its 2x2 four-week plan.</p>}
-            {selectedStrengthTemplateId && (
-              <div className="panel-grid">
-                {[1, 2, 3, 4].map((week) => {
-                  const template = strengthTemplates.find((item) => item.id === selectedStrengthTemplateId);
-                  if (!template) {
-                    return null;
-                  }
-
-                  const tm = getTemplateTrainingMax(template);
-                  const weekTyped = week as FiveThreeOneWeek;
-                  const sets = build531Sets(tm, template.incrementKg, weekTyped);
-                  const topSet = sets[sets.length - 1];
-                  const hasAmrapSet = topSet.reps.includes("+");
-                  const draftKey = getTemplateWeekKey(template.id, weekTyped);
-                  const amrapDraft = amrapDraftByTemplateWeek[draftKey] ?? "";
-
-                  return (
-                    <article key={`week-preview-${week}`} className="panel">
-                      <div className="metric-row">
-                        <h3>{template.name} - Week {week}</h3>
-                        {hasAmrapSet && (
-                          <button type="button" onClick={() => void saveAmrapPerformed(template.id, weekTyped)}>
-                            Save
-                          </button>
-                        )}
-                      </div>
-                      <table>
-                        <thead>
-                          <tr>
-                            <th>Set</th>
-                            <th>%</th>
-                            <th>Reps</th>
-                            <th>Target</th>
-                            <th>Reps performed</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {sets.map((set, index) => (
-                            <tr key={`week-${week}-set-${index}`}>
-                              <td>{index + 1}</td>
-                              <td>{Math.round(set.percentage * 100)}%</td>
-                              <td>{set.reps}</td>
-                              <td>{set.targetWeightKg.toFixed(1)} kg</td>
-                              <td>
-                                {index === sets.length - 1 && hasAmrapSet ? (
-                                  <input
-                                    type="number"
-                                    min={0}
-                                    value={amrapDraft}
-                                    onChange={(event) =>
-                                      setAmrapDraftByTemplateWeek((previous) => ({
-                                        ...previous,
-                                        [draftKey]: event.target.value,
-                                      }))
-                                    }
-                                    placeholder="AMRAP reps"
-                                  />
-                                ) : (
-                                  "-"
-                                )}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </article>
-                  );
-                })}
-              </div>
-            )}
-          </article>
-        </section>
+        <StrengthTab
+          settings={settings}
+          strengthSets={strengthSets}
+          patchSettings={patchSettings}
+          onImportFile={(file) => void importFitNotesFile(file)}
+          onSyncFromDrive={handleFitNotesDriveSync}
+          driveConnected={Boolean(driveSession)}
+          syncing={fitnotesSyncing}
+        />
       )}
 
       {tab === "settings" && (
@@ -2778,7 +2328,6 @@ function App() {
               <summary>Legacy CSV Export (for reference)</summary>
               <div className="metric-row">
                 <button type="button" onClick={exportBouldersToCSV}>⬇ Export Bouldering CSV</button>
-                <button type="button" onClick={exportStrengthToCSV}>⬇ Export Strength CSV</button>
               </div>
               <div className="import-row">
                 <label className="file-import-label">
@@ -2786,14 +2335,6 @@ function App() {
                   <input type="file" accept=".csv" className="hidden-file-input" onChange={(e) => {
                     const file = e.target.files?.[0];
                     if (file) void importBouldersFromCSV(file);
-                    e.target.value = "";
-                  }} />
-                </label>
-                <label className="file-import-label">
-                  ⬆ Import Strength CSV
-                  <input type="file" accept=".csv" className="hidden-file-input" onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (file) void importStrengthFromCSV(file);
                     e.target.value = "";
                   }} />
                 </label>
@@ -2942,6 +2483,7 @@ function App() {
                     <th>Sleep</th>
                     <th>Stress</th>
                     <th>Motivation</th>
+                    <th>Source</th>
                     <th>Actions</th>
                   </tr>
                 </thead>
@@ -2973,6 +2515,15 @@ function App() {
                         <td>{session.stress}</td>
                         <td>{session.motivation}</td>
                         <td>
+                          {session.source === "toplogger" ? (
+                            <span className="source-badge" title={session.locallyEdited ? "Edited after sync" : "Synced from TopLogger"}>
+                              TopLogger{session.locallyEdited ? " ✎" : ""}
+                            </span>
+                          ) : (
+                            "Manual"
+                          )}
+                        </td>
+                        <td>
                           <button type="button" onClick={() => beginEditSession(session)}>
                             Edit
                           </button>
@@ -2987,39 +2538,7 @@ function App() {
 
           <article className="panel full-width">
             <h2>Strength History</h2>
-            {strengthSessions.length === 0 && <p>No strength sessions saved yet.</p>}
-            {strengthSessions.length > 0 && (
-              <table>
-                <thead>
-                  <tr>
-                    <th>Entry Date</th>
-                    <th>Session Date</th>
-                    <th>Cycle</th>
-                    <th>Week</th>
-                    <th>Exercises</th>
-                    <th>Notes</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {strengthSessions.map((session) => (
-                    <tr key={session.id}>
-                      <td>{new Date(session.createdAt).toLocaleString()}</td>
-                      <td>{session.sessionDate}</td>
-                      <td><span className="cycle-badge">Cycle {session.cycleNumber ?? 1}</span></td>
-                      <td>{session.week}</td>
-                      <td>{session.exercises.length}</td>
-                      <td>{session.notes ?? "-"}</td>
-                      <td>
-                        <button type="button" onClick={() => beginEditStrengthSession(session)}>
-                          Edit
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
+            <StrengthHistoryTable settings={settings} strengthSets={strengthSets} />
           </article>
         </section>
       )}

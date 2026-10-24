@@ -341,6 +341,18 @@ export function suggestedCapacityRange(climberMaxGrade: Grade): { min: number; m
   return { min, max };
 }
 
+export function getAcwrZone(acwr: number, lowThreshold: number, highThreshold: number): string {
+  if (acwr < lowThreshold) {
+    return "Detraining";
+  }
+
+  if (acwr > highThreshold) {
+    return "High Risk";
+  }
+
+  return "Goldilocks";
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }

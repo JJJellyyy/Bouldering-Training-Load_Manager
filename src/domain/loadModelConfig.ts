@@ -28,7 +28,27 @@ export const DEFAULT_SETTINGS: AppSettings = {
     },
     showAllCombinations: true,
   },
+  strength: {
+    metric: "relative",
+    bodyweightKg: 70,
+    acuteWindow: 7,
+    chronicWindow: 28,
+    bodyweightExercises: {},
+  },
+  toplogger: {
+    autoSync: true,
+    importFromDate: daysAgoIsoDate(90),
+    countMode: "attempted",
+    defaultDurationMinutes: 120,
+  },
+  fitnotes: {
+    autoSyncFromDrive: false,
+  },
 };
+
+function daysAgoIsoDate(days: number): string {
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
 
 export function clampSettings(input: AppSettings): AppSettings {
   const incoming = (input ?? DEFAULT_SETTINGS) as Partial<AppSettings>;
@@ -86,6 +106,19 @@ export function clampSettings(input: AppSettings): AppSettings {
       showAllCombinations:
         incoming.model?.showAllCombinations ?? DEFAULT_SETTINGS.model.showAllCombinations,
     },
+    strength: {
+      ...DEFAULT_SETTINGS.strength,
+      ...(incoming.strength ?? {}),
+      bodyweightExercises: { ...(incoming.strength?.bodyweightExercises ?? {}) },
+    },
+    toplogger: {
+      ...DEFAULT_SETTINGS.toplogger,
+      ...(incoming.toplogger ?? {}),
+    },
+    fitnotes: {
+      ...DEFAULT_SETTINGS.fitnotes,
+      ...(incoming.fitnotes ?? {}),
+    },
   };
 
   next.stressScaleMax = clamp(next.stressScaleMax, 3, 20);
@@ -114,6 +147,19 @@ export function clampSettings(input: AppSettings): AppSettings {
   next.model.acwr.acuteWindow = clamp(next.model.acwr.acuteWindow, 3, 60);
   next.model.acwr.chronicWindow = clamp(next.model.acwr.chronicWindow, 3, 60);
   next.model.acwr.targetAcwr = clamp(next.model.acwr.targetAcwr, 0.5, 1.5);
+
+  if (!["relative", "volume", "sets"].includes(next.strength.metric)) {
+    next.strength.metric = DEFAULT_SETTINGS.strength.metric;
+  }
+  next.strength.bodyweightKg = clamp(next.strength.bodyweightKg, 0, 250);
+  next.strength.acuteWindow = clamp(Math.round(next.strength.acuteWindow), 3, 60);
+  next.strength.chronicWindow = clamp(Math.round(next.strength.chronicWindow), 3, 90);
+
+  next.toplogger.countMode = next.toplogger.countMode === "sent" ? "sent" : "attempted";
+  next.toplogger.defaultDurationMinutes = clamp(Math.round(next.toplogger.defaultDurationMinutes), 10, 600);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(next.toplogger.importFromDate)) {
+    next.toplogger.importFromDate = DEFAULT_SETTINGS.toplogger.importFromDate;
+  }
 
   // Add acute and chronic windows to the EWMA windows list
   if (!next.model.ewmaWindows.includes(next.model.acwr.acuteWindow)) {

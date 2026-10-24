@@ -1,19 +1,12 @@
-import type {
-  AppSettings,
-  EWMASnapshot,
-  SessionInput,
-  StrengthExerciseTemplate,
-  StrengthSession,
-} from "../types";
+import type { AppSettings, EWMASnapshot, SessionInput, StrengthSet } from "../types";
 
 const DB_NAME = "boulder-load-manager";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 const STORE_SESSIONS = "sessions";
 const STORE_SETTINGS = "settings";
 const STORE_EWMA = "ewma";
-const STORE_STRENGTH_TEMPLATES = "strength-templates";
-const STORE_STRENGTH_SESSIONS = "strength-sessions";
+const STORE_STRENGTH_SETS = "strength-sets";
 const SETTINGS_KEY = "app-settings";
 
 let dbPromise: Promise<IDBDatabase> | undefined;
@@ -41,12 +34,8 @@ function openDatabase(): Promise<IDBDatabase> {
         db.createObjectStore(STORE_EWMA, { keyPath: "key" });
       }
 
-      if (!db.objectStoreNames.contains(STORE_STRENGTH_TEMPLATES)) {
-        db.createObjectStore(STORE_STRENGTH_TEMPLATES, { keyPath: "id" });
-      }
-
-      if (!db.objectStoreNames.contains(STORE_STRENGTH_SESSIONS)) {
-        db.createObjectStore(STORE_STRENGTH_SESSIONS, { keyPath: "id" });
+      if (!db.objectStoreNames.contains(STORE_STRENGTH_SETS)) {
+        db.createObjectStore(STORE_STRENGTH_SETS, { keyPath: "id" });
       }
     };
 
@@ -118,38 +107,23 @@ export async function clearEwmaSnapshots(): Promise<void> {
   await runTransaction<undefined>(STORE_EWMA, "readwrite", (store) => store.clear());
 }
 
-export async function loadStrengthTemplates(): Promise<StrengthExerciseTemplate[]> {
-  const rows = await runTransaction<StrengthExerciseTemplate[]>(STORE_STRENGTH_TEMPLATES, "readonly", (store) =>
-    store.getAll(),
-  );
-
-  return rows.sort((a, b) => a.name.localeCompare(b.name));
+export async function loadStrengthSets(): Promise<StrengthSet[]> {
+  const rows = await runTransaction<StrengthSet[]>(STORE_STRENGTH_SETS, "readonly", (store) => store.getAll());
+  return rows.sort((a, b) => a.date.localeCompare(b.date));
 }
 
-export async function saveStrengthTemplate(template: StrengthExerciseTemplate): Promise<void> {
-  await runTransaction<IDBValidKey>(STORE_STRENGTH_TEMPLATES, "readwrite", (store) => store.put(template));
-}
+/** FitNotes exports contain the full history, so an import replaces every stored set. */
+export async function replaceStrengthSets(sets: StrengthSet[]): Promise<void> {
+  const db = await openDatabase();
 
-export async function deleteStrengthTemplate(templateId: string): Promise<void> {
-  await runTransaction<undefined>(STORE_STRENGTH_TEMPLATES, "readwrite", (store) => store.delete(templateId));
-}
-
-export async function loadStrengthSessions(): Promise<StrengthSession[]> {
-  const rows = await runTransaction<StrengthSession[]>(STORE_STRENGTH_SESSIONS, "readonly", (store) =>
-    store.getAll(),
-  );
-
-  return rows.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-}
-
-export async function saveStrengthSession(session: StrengthSession): Promise<void> {
-  await runTransaction<IDBValidKey>(STORE_STRENGTH_SESSIONS, "readwrite", (store) => store.put(session));
-}
-
-export async function clearStrengthTemplates(): Promise<void> {
-  await runTransaction<undefined>(STORE_STRENGTH_TEMPLATES, "readwrite", (store) => store.clear());
-}
-
-export async function clearStrengthSessions(): Promise<void> {
-  await runTransaction<undefined>(STORE_STRENGTH_SESSIONS, "readwrite", (store) => store.clear());
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE_STRENGTH_SETS, "readwrite");
+    const store = tx.objectStore(STORE_STRENGTH_SETS);
+    store.clear();
+    for (const set of sets) {
+      store.put(set);
+    }
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
 }
