@@ -22,6 +22,7 @@ import {
   buildSessionHistory,
   getAcwrZoneKey,
   getSessionDayKey,
+  findBoulderingGaps,
   type Readiness,
 } from "./domain/loadCalculator";
 import { buildWeeklyWellness } from "./domain/wellness";
@@ -29,6 +30,8 @@ import { WellnessCharts } from "./components/WellnessCharts";
 import { BoulderingModelCard } from "./components/BoulderingModelCard";
 import { GradeBreakdownTable } from "./components/GradeBreakdownTable";
 import { RecommendationCard } from "./components/RecommendationCard";
+import { GapsCard } from "./components/GapsCard";
+import type { GapDecision } from "./domain/gaps";
 import { SessionForm, type SessionDraft } from "./components/SessionForm";
 import { buildRecommendation } from "./domain/recommendations";
 import { AcwrHistoryChart } from "./components/AcwrHistoryChart";
@@ -222,6 +225,15 @@ function App() {
   const overallAcwr = sessions.length === 0 || fullSessionHistory.length === 0 ? null : fullSessionHistory[fullSessionHistory.length - 1].acwr;
   const acwrCalibrating = isCalibrating(fullSessionHistory, settings.model.acwr.chronicWindow);
   const trends = useMemo(() => calculateTrendMetrics(fullSessionHistory), [fullSessionHistory]);
+  const logGaps = useMemo(() => findBoulderingGaps(sessions, settings), [sessions, settings]);
+
+  function decideGap(gapId: string, decision: GapDecision | undefined): void {
+    patchSettings((next) => {
+      if (decision) next.logGaps[gapId] = decision;
+      else delete next.logGaps[gapId];
+    });
+  }
+
   const recommendation = useMemo(
     () => (sessions.length === 0 ? null : buildRecommendation(fullSessionHistory, currentReferenceGrade, settings)),
     [sessions.length, fullSessionHistory, currentReferenceGrade, settings],
@@ -1044,6 +1056,8 @@ function App() {
           />
 
           <BoulderingModelCard settings={settings} patchSettings={patchSettings} referenceGrade={currentReferenceGrade} />
+
+          <GapsCard gaps={logGaps} onDecide={decideGap} />
 
           <article className="panel full-width">
             <div className="panel-heading">

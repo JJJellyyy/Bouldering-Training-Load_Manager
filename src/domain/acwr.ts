@@ -2,6 +2,8 @@
 export interface DailyLoad {
   date: string;
   load: number;
+  /** True when the load is an estimate for a day you were climbing but didn't log. */
+  estimated?: boolean;
 }
 
 export interface HistoryPoint {
@@ -10,6 +12,7 @@ export interface HistoryPoint {
   acute: number;
   chronic: number;
   acwr: number;
+  estimated?: boolean;
 }
 
 export function todayIsoDate(): string {
@@ -60,7 +63,7 @@ export function buildAcwrHistory(days: DailyLoad[], acuteWindow: number, chronic
   return days.map((day) => {
     acute = acuteAlpha * day.load + (1 - acuteAlpha) * acute;
     chronic = chronicAlpha * day.load + (1 - chronicAlpha) * chronic;
-    return { date: day.date, load: day.load, acute, chronic, acwr: chronic > 0 ? acute / chronic : 0 };
+    return { date: day.date, load: day.load, acute, chronic, acwr: chronic > 0 ? acute / chronic : 0, estimated: day.estimated };
   });
 }
 
@@ -135,6 +138,33 @@ export function solveLoadForAcwr(
   const { prevAcute, prevChronic, existing } = stateBeforeDay(history, plannedDate, acuteAlpha, chronicAlpha);
   const dayLoad = (targetAcwr * (1 - chronicAlpha) * prevChronic - (1 - acuteAlpha) * prevAcute) / denominator;
   return Math.max(0, dayLoad - existing);
+}
+
+/**
+ * ACWR at the end of a run of planned days: `plannedLoads[i]` is the load on `startDate + i` (0 = rest).
+ * Used to show where a deload week takes you.
+ */
+export function projectAcwr(
+  history: HistoryPoint[],
+  startDate: string,
+  plannedLoads: number[],
+  acuteWindow: number,
+  chronicWindow: number,
+): number | null {
+  if (history.length === 0) return null;
+
+  const acuteAlpha = 2 / (acuteWindow + 1);
+  const chronicAlpha = 2 / (chronicWindow + 1);
+  const { prevAcute, prevChronic, existing } = stateBeforeDay(history, startDate, acuteAlpha, chronicAlpha);
+
+  let acute = prevAcute;
+  let chronic = prevChronic;
+  plannedLoads.forEach((load, index) => {
+    const dayLoad = load + (index === 0 ? existing : 0);
+    acute = acuteAlpha * dayLoad + (1 - acuteAlpha) * acute;
+    chronic = chronicAlpha * dayLoad + (1 - chronicAlpha) * chronic;
+  });
+  return chronic > 0 ? acute / chronic : 0;
 }
 
 export interface TrendMetrics {

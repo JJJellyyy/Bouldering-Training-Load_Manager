@@ -41,6 +41,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   fitnotes: {
     autoSyncFromDrive: false,
   },
+  logGaps: {},
 };
 
 function daysAgoIsoDate(days: number): string {
@@ -89,6 +90,9 @@ export function clampSettings(input: AppSettings): AppSettings {
       ...DEFAULT_SETTINGS.fitnotes,
       ...(incoming.fitnotes ?? {}),
     },
+    logGaps: Object.fromEntries(
+      Object.entries(incoming.logGaps ?? {}).filter(([, decision]) => decision === "climbing" || decision === "break"),
+    ),
   };
 
   next.stressScaleMax = clamp(next.stressScaleMax, 3, 20);

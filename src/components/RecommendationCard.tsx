@@ -15,6 +15,23 @@ function headline(recommendation: Recommendation, settings: AppSettings): { tone
   const when = describeDay(recommendation.planDate, recommendation.restDays);
   const room = `Load ${recommendation.loadMin.toFixed(0)}–${recommendation.loadMax.toFixed(0)} keeps you in the sweet spot.`;
 
+  if (recommendation.mode === "deload") {
+    const sessions = recommendation.sessionsPerWeek;
+    const weekEnd = recommendation.deloadWeekAcwr;
+    const restFirst = recommendation.restDays > 0 ? `You already climbed today, so start ${when}. ` : "";
+    return {
+      tone: recommendation.status === "over" ? "over" : "close",
+      title: "Deload week",
+      body:
+        `Your ACWR is ${current} (limit ${high.toFixed(2)}). No need to stop: for the next week keep sessions to about half your usual ` +
+        `size (${recommendation.loadMin.toFixed(0)} instead of ${recommendation.typicalSessionLoad.toFixed(0)}) and a grade easier. ` +
+        restFirst +
+        (weekEnd !== null
+          ? `At your usual ${sessions} session${sessions === 1 ? "" : "s"} a week that brings your ACWR to about ${weekEnd.toFixed(2)}.`
+          : ""),
+    };
+  }
+
   if (recommendation.restDays > 0) {
     return {
       tone: recommendation.status === "over" ? "over" : "close",
@@ -35,13 +52,13 @@ function headline(recommendation: Recommendation, settings: AppSettings): { tone
 }
 
 function OptionCard({ option, displayGrade, settings }: { option: SessionOption; displayGrade: (grade: Grade) => string; settings: AppSettings }) {
+  // In a deload week the point is where the week ends up, not the day after one session.
+  const shownAcwr = option.weekAcwr ?? option.predictedAcwr;
   return (
     <article className={`rec-card ${option.available ? "" : "disabled"}`}>
       <div className="rec-card-head">
-        <h3>{option.title}</h3>
-        {option.available && (
-          <ZoneBadge acwr={option.predictedAcwr} low={settings.model.acwr.lowThreshold} high={settings.model.acwr.highThreshold} />
-        )}
+        <h3>{option.available && option.weekAcwr !== undefined ? `Deload ${option.title.toLowerCase()}` : option.title}</h3>
+        {option.available && <ZoneBadge acwr={shownAcwr} low={settings.model.acwr.lowThreshold} high={settings.model.acwr.highThreshold} />}
       </div>
       <p className="muted-hint">{option.blurb}</p>
 
@@ -56,8 +73,9 @@ function OptionCard({ option, displayGrade, settings }: { option: SessionOption;
             ))}
           </ul>
           <p className="rec-meta">
-            {option.totalAttempts} attempts · about {option.minutes} min · load {option.load.toFixed(0)} → ACWR{" "}
-            <strong>{option.predictedAcwr.toFixed(2)}</strong>
+            {option.totalAttempts} attempts · about {option.minutes} min · load {option.load.toFixed(0)} →{" "}
+            {option.weekAcwr !== undefined ? "ACWR after a week of these " : "ACWR "}
+            <strong>{shownAcwr.toFixed(2)}</strong>
           </p>
         </>
       ) : (
@@ -103,9 +121,12 @@ export function RecommendationCard({
 
       <p className="muted-hint">
         For a session {describeDay(recommendation.planDate, recommendation.restDays)}, measured against your current max of{" "}
-        <strong>{displayGrade(referenceGrade)}</strong>. Each option stays below an ACWR of{" "}
-        {(settings.model.acwr.highThreshold - 0.05).toFixed(2)}; hard sessions are never suggested while you are over or within 0.10 of{" "}
-        {settings.model.acwr.highThreshold.toFixed(2)}. Attempts are problems you climb, not individual tries.
+        <strong>{displayGrade(referenceGrade)}</strong>.{" "}
+        {recommendation.mode === "deload"
+          ? "Deload sessions are half your usual size and a grade easier; repeat them for about a week."
+          : `Each option stays below an ACWR of ${(settings.model.acwr.highThreshold - 0.05).toFixed(2)}.`}{" "}
+        Hard sessions are never suggested while you are over or within 0.10 of {settings.model.acwr.highThreshold.toFixed(2)}. Attempts are
+        problems you climb, not individual tries.
       </p>
     </div>
   );

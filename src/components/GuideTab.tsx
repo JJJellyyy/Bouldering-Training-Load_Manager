@@ -218,16 +218,17 @@ export function GuideTab({ settings, referenceGrade }: { settings: AppSettings; 
               Few problems at and just above your max, with long rests. Uses less total load, but each attempt is hard. It is{" "}
               <strong>never suggested while your ACWR is over {highThreshold.toFixed(2)} or within 0.10 of it</strong>.
             </dd>
-            <dt>Rest first</dt>
+            <dt>Deload week</dt>
             <dd>
-              If you are over the limit, it first tells you how many rest days it takes to get back, and plans the session for
-              that day.
+              When you are over the limit, stopping completely isn't the answer. Instead you get a deload: sessions about half your
+              usual size and a grade easier, at your usual number of sessions a week, plus where that takes your ACWR after a week.
+              At most a day or two of full rest is ever suggested.
             </dd>
           </dl>
           <p>
-            Every option ends below an ACWR of {(highThreshold - 0.05).toFixed(2)}. If you tend to climb a huge session, rest a
-            lot and then climb huge again, following these keeps your sessions closer to the same size, which flattens those
-            swings.
+            Normally every option ends below an ACWR of {(highThreshold - 0.05).toFixed(2)}. If you tend to climb a huge session,
+            rest a lot and then climb huge again, following these keeps your sessions closer to the same size, which flattens
+            those swings.
           </p>
           <p className="muted-hint">
             "Try your own session" lets you check any session you have in mind, on any date.
@@ -312,6 +313,11 @@ export function GuideTab({ settings, referenceGrade }: { settings: AppSettings; 
             <dd>
               By default every boulder you tried, sent or not. You can switch to only sends, or to every single try (five goes
               on a project count as five) under Sync options.
+            </dd>
+            <dt>Weeks you didn't log</dt>
+            <dd>
+              If nothing is logged for 2 weeks or more between sessions, the Bouldering tab asks whether you were climbing. Say yes
+              and those days are filled with your usual load (shown as estimated), so your next sessions don't look like a spike.
             </dd>
             <dt>Editing synced sessions</dt>
             <dd>
@@ -415,6 +421,11 @@ export function GuideTab({ settings, referenceGrade }: { settings: AppSettings; 
           <dl className="guide-terms">
             <dt>Why does my ACWR drop on rest days?</dt>
             <dd>Your recent average forgets faster than your long-term one, so every rest day lowers the ratio a little.</dd>
+            <dt>I didn't log for a while and now my ACWR is huge.</dt>
+            <dd>
+              Unlogged weeks count as rest, so your long-term average dropped and normal sessions now look like a spike. Answer the
+              "Were you climbing?" question on the Bouldering tab and the gap is filled with your usual load.
+            </dd>
             <dt>Why are the recommended sessions sometimes small?</dt>
             <dd>
               Right after a big session there isn't much room left before the high threshold. A day or two of rest opens it up

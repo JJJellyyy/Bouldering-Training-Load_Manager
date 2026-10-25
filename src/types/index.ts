@@ -160,6 +160,8 @@ export interface AppSettings {
   strength: StrengthConfig;
   toplogger: TopLoggerConfig;
   fitnotes: FitNotesConfig;
+  /** Your answer per gap in the log (keyed by gap id): climbing but not logging, or a real break. */
+  logGaps: Record<string, "climbing" | "break">;
 }
 
 export interface CalculationResult {

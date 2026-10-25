@@ -1,6 +1,7 @@
 import type { AppSettings, CalculationResult, Grade, GradeDisplayUnit, SessionInput } from "../types";
 import { FONT_BY_GRADE } from "../types";
 import { addDays, buildAcwrHistory, fillDailyLoads, todayIsoDate, type HistoryPoint } from "./acwr";
+import { fillLogGaps, findLogGaps, type LogGap } from "./gaps";
 
 export type { HistoryPoint } from "./acwr";
 
@@ -194,12 +195,17 @@ export function buildSessionHistory(
   daysBack: number | null,
 ): HistoryPoint[] {
   const history = buildAcwrHistory(
-    buildDailyLoads(sessions, settings),
+    fillLogGaps(buildDailyLoads(sessions, settings), settings.logGaps),
     settings.model.acwr.acuteWindow,
     settings.model.acwr.chronicWindow,
   );
 
   return daysBack === null ? history : history.slice(-daysBack);
+}
+
+/** Stretches of 2+ weeks with nothing logged between sessions, with your answer if you gave one. */
+export function findBoulderingGaps(sessions: SessionInput[], settings: AppSettings): Array<LogGap & { decision?: "climbing" | "break" }> {
+  return findLogGaps(buildDailyLoads(sessions, settings)).map((gap) => ({ ...gap, decision: settings.logGaps[gap.id] }));
 }
 
 export interface MovingAveragePoint {

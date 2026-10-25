@@ -53,7 +53,7 @@ export function AcwrHistoryChart({
         tooltipExtras={(index) => [
           { label: "acute", value: formatCompact(points[index].acute) },
           { label: "chronic", value: formatCompact(points[index].chronic) },
-          { label: "load that day", value: formatCompact(points[index].load) },
+          { label: points[index].estimated ? "load that day (estimated, not logged)" : "load that day", value: formatCompact(points[index].load) },
         ]}
         endLabels
         showLegend={false}
