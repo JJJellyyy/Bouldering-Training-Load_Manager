@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import "./App.css";
 import {
   clearSessions,
+  deleteSession,
   loadSessions,
   loadSettings,
   loadStrengthSets,
@@ -13,15 +14,11 @@ import { addDays, calculateTrendMetrics, isCalibrating, predictAcwr, todayIsoDat
 import { DEFAULT_SETTINGS, clampSettings } from "./domain/loadModelConfig";
 import {
   assessReadiness,
-  calculateGradeIntensity,
-  calculateSpeedMultiplier,
   calculateSessionLoad,
-  calculateGradeDistribution,
   gradeFromNumber,
   gradeToDisplay,
   gradeToNumber,
   referenceGradeOn,
-  suggestedCapacityRange,
   buildSessionHistory,
   getAcwrZoneKey,
   getSessionDayKey,
@@ -29,11 +26,16 @@ import {
 } from "./domain/loadCalculator";
 import { buildWeeklyWellness } from "./domain/wellness";
 import { WellnessCharts } from "./components/WellnessCharts";
+import { BoulderingModelCard } from "./components/BoulderingModelCard";
+import { GradeBreakdownTable } from "./components/GradeBreakdownTable";
+import { RecommendationCard } from "./components/RecommendationCard";
+import { SessionForm, type SessionDraft } from "./components/SessionForm";
+import { buildRecommendation } from "./domain/recommendations";
 import { AcwrHistoryChart } from "./components/AcwrHistoryChart";
 import { BrandMark, RangePills, TabIcon, ThemeToggle } from "./components/Chrome";
-import { ColumnChart } from "./components/charts/ColumnChart";
 import { formatCompact, formatLongDate } from "./components/charts/chartUtils";
-import { CurveChart, EwmaWeightsChart, LoadTotalsChart } from "./components/ModelCharts";
+import { LoadTotalsChart } from "./components/ModelCharts";
+import { GuideTab } from "./components/GuideTab";
 import { ZoneBadge } from "./components/ZoneBadge";
 import { buildStrengthHistory, calculateSetLoads } from "./domain/strengthLoad";
 import { NumberInput } from "./components/NumberInput";
@@ -62,30 +64,16 @@ import {
 } from "./integrations/googleDrive";
 import {
   GRADES,
-  HOLD_TYPES,
-  WALL_ANGLES,
   type AppSettings,
   type DriveBackupPayload,
   type Grade,
   type GradeDisplayUnit,
-  type HoldType,
   type ProblemEntry,
   type SessionInput,
   type StrengthSet,
-  type WallAngle,
 } from "./types";
 
-type TabName = "session" | "dashboard" | "strength" | "settings" | "history";
-
-interface SessionDraft {
-  sessionDate: string;
-  durationMinutes: number;
-  sleepHours: number;
-  sleepQuality: number;
-  stress: number;
-  motivation: number;
-  problems: ProblemEntry[];
-}
+type TabName = "session" | "bouldering" | "strength" | "settings" | "history" | "guide";
 
 function createSessionDraft(settings: AppSettings): SessionDraft {
   return {
@@ -121,7 +109,8 @@ function ReadinessNote({ readiness, label }: { readiness: Readiness; label: stri
 function App() {
   const [tab, setTab] = useState<TabName>(() => {
     const saved = localStorage.getItem("blm_tab");
-    return (saved as TabName | null) ?? "session";
+    // "dashboard" was renamed to "bouldering".
+    return saved === "dashboard" || saved === null ? "bouldering" : (saved as TabName);
   });
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [sessions, setSessions] = useState<SessionInput[]>([]);
@@ -132,13 +121,12 @@ function App() {
   const [toploggerSyncing, setToploggerSyncing] = useState(false);
   const [draft, setDraft] = useState<SessionDraft>(createSessionDraft(DEFAULT_SETTINGS));
   const [editingSessionId, setEditingSessionId] = useState<string | undefined>();
-  const [editingSessionCreatedAt, setEditingSessionCreatedAt] = useState<string | undefined>();
+  const [editDraft, setEditDraft] = useState<SessionDraft | undefined>();
   const [loading, setLoading] = useState(true);
   const [driveSession, setDriveSession] = useState<GoogleAuthSession | undefined>();
   const [googleProfile, setGoogleProfile] = useState<GoogleProfile | undefined>();
   const [driveStatus, setDriveStatus] = useState<string>("Google Drive not connected.");
   const [driveConnectError, setDriveConnectError] = useState<string | undefined>(undefined);
-  const [driveLog, setDriveLog] = useState<string[]>([]);
   const [notification, setNotification] = useState<string | undefined>(undefined);
   // Dashboard history graph
   const [historyRange, setHistoryRange] = useState<number | null>(28);
@@ -157,9 +145,7 @@ function App() {
   }
 
   function addDriveLog(msg: string): void {
-    const entry = `[${new Date().toLocaleTimeString()}] ${msg}`;
-    console.log("[Drive]", msg);
-    setDriveLog((prev) => [...prev.slice(-19), entry]);
+    console.debug("[Drive]", msg);
   }
 
   function showNotification(msg: string, ms = 4000): void {
@@ -167,11 +153,6 @@ function App() {
     window.setTimeout(() => setNotification(undefined), ms);
   }
 
-  const [entryCount, setEntryCount] = useState(1);
-  const [entryGrade, setEntryGrade] = useState<Grade>("V4");
-  const [entryHold, setEntryHold] = useState<HoldType>("mixed");
-  const [entryAngle, setEntryAngle] = useState<WallAngle>("vert");
-  const [entryDate, setEntryDate] = useState<string>(todayIsoDate());
   const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
 
   function storeDriveSession(session: GoogleAuthSession | undefined): void {
@@ -205,10 +186,6 @@ function App() {
     }
   }
 
-  const totalProblems = useMemo(
-    () => draft.problems.reduce((sum, problem) => sum + problem.count, 0),
-    [draft.problems],
-  );
 
   // The max grade loads are measured against today; earlier days use the max at that time.
   const currentReferenceGrade = useMemo(
@@ -216,32 +193,25 @@ function App() {
     [sessions, settings],
   );
 
-  const estimatedLoad = useMemo(() => {
-    if (draft.problems.length === 0) {
-      return undefined;
-    }
+  function estimateDraftLoad(draftValue: SessionDraft, excludeId?: string) {
+    if (draftValue.problems.length === 0) return undefined;
 
     const draftSession: SessionInput = {
-      id: "draft",
-      createdAt: `${draft.sessionDate}T12:00:00Z`,
-      durationMinutes: draft.durationMinutes,
-      sleepHours: draft.sleepHours,
-      sleepQuality: draft.sleepQuality,
-      stress: draft.stress,
-      motivation: draft.motivation,
-      problems: draft.problems,
+      id: excludeId ?? "draft",
+      createdAt: `${draftValue.sessionDate}T12:00:00Z`,
+      durationMinutes: draftValue.durationMinutes,
+      sleepHours: draftValue.sleepHours,
+      sleepQuality: draftValue.sleepQuality,
+      stress: draftValue.stress,
+      motivation: draftValue.motivation,
+      problems: draftValue.problems,
     };
-    const otherSessions = sessions.filter((item) => item.id !== editingSessionId);
-    const reference = referenceGradeOn(draft.sessionDate, [...otherSessions, draftSession], settings);
+    const otherSessions = sessions.filter((item) => item.id !== excludeId);
+    const reference = referenceGradeOn(draftValue.sessionDate, [...otherSessions, draftSession], settings);
     return calculateSessionLoad(draftSession, reference, settings);
-  }, [draft, sessions, settings, editingSessionId]);
+  }
 
-  const draftReadiness = useMemo(
-    () => assessReadiness(draft.sleepHours, draft.sleepQuality, draft.stress, settings),
-    [draft.sleepHours, draft.sleepQuality, draft.stress, settings],
-  );
 
-  const capacityRange = useMemo(() => suggestedCapacityRange(currentReferenceGrade), [currentReferenceGrade]);
 
   // One ACWR over all bouldering, running through today so it decays on rest days.
   const fullSessionHistory = useMemo(() => buildSessionHistory(sessions, settings, null), [sessions, settings]);
@@ -252,6 +222,10 @@ function App() {
   const overallAcwr = sessions.length === 0 || fullSessionHistory.length === 0 ? null : fullSessionHistory[fullSessionHistory.length - 1].acwr;
   const acwrCalibrating = isCalibrating(fullSessionHistory, settings.model.acwr.chronicWindow);
   const trends = useMemo(() => calculateTrendMetrics(fullSessionHistory), [fullSessionHistory]);
+  const recommendation = useMemo(
+    () => (sessions.length === 0 ? null : buildRecommendation(fullSessionHistory, currentReferenceGrade, settings)),
+    [sessions.length, fullSessionHistory, currentReferenceGrade, settings],
+  );
   const weeklyWellness = useMemo(() => buildWeeklyWellness(sessions, settings.stressScaleMax, 12), [sessions, settings.stressScaleMax]);
 
   const strengthNow = useMemo(() => {
@@ -292,144 +266,6 @@ function App() {
     [plannerSleep, plannerSleepQuality, plannerStress, settings],
   );
 
-  const gradeDistribution = useMemo(() => {
-    if (!plannerPrediction || plannerPrediction.actualLoad <= 0) return {};
-    return calculateGradeDistribution(plannerPrediction.actualLoad, plannerPrediction.speedMultiplier, currentReferenceGrade, settings);
-  }, [plannerPrediction, currentReferenceGrade, settings]);
-
-  // Boulder distribution: show count of each grade centered around planner grade (normal distribution ±2)
-  const boulderDistribution = useMemo(() => {
-    if (!plannerPrediction || plannerPrediction.actualLoad <= 0) return [];
-
-    const targetLoad = plannerPrediction.actualLoad / plannerPrediction.speedMultiplier;
-    const gradeNum = gradeToNumber(plannerGrade);
-
-    // Get grades from -2 to +1 relative to center
-    const gradesInRange: Array<{ grade: Grade; offset: number }> = [];
-    for (let offset = -2; offset <= 1; offset++) {
-      const targetNum = gradeNum + offset;
-      const grade = GRADES.find((g) => gradeToNumber(g) === targetNum);
-      if (grade) {
-        gradesInRange.push({ grade, offset });
-      }
-    }
-
-    if (gradesInRange.length === 0) return [];
-
-    // Normal-distribution weights centred on the planned grade (sd = 1).
-    const weights = gradesInRange.map(({ offset }) => Math.exp(-0.5 * offset * offset));
-    const totalWeight = weights.reduce((sum, w) => sum + w, 0);
-
-    const distribution: Array<{ grade: Grade; count: number; intensity: number; offset: number }> = [];
-    let totalIntensity = 0;
-
-    for (let i = 0; i < gradesInRange.length; i++) {
-      const { grade, offset } = gradesInRange[i];
-      const normalizedWeight = weights[i] / totalWeight;
-      const count = Math.round(plannerCount * normalizedWeight);
-      const intensity = calculateGradeIntensity(grade, currentReferenceGrade, settings);
-      distribution.push({ grade, count, intensity, offset });
-      totalIntensity += count * intensity;
-    }
-
-    // Scale all counts to match target load
-    if (totalIntensity > 0) {
-      const scale = targetLoad / totalIntensity;
-      let totalCount = 0;
-      for (let i = 0; i < distribution.length; i++) {
-        distribution[i].count = Math.round(distribution[i].count * scale);
-        // Cap +1 grade at 15% of total
-        if (distribution[i].offset === 1) {
-          distribution[i].count = Math.min(distribution[i].count, Math.round(plannerCount * 0.15));
-        }
-        totalCount += distribution[i].count;
-      }
-      // Redistribute remaining count to center grade
-      const surplus = plannerCount - totalCount;
-      const centerIdx = distribution.findIndex((d) => d.offset === 0);
-      if (centerIdx >= 0) {
-        distribution[centerIdx].count += surplus;
-      }
-    }
-
-    return distribution.map(({ grade, count }) => ({ grade, count })).filter((d) => d.count > 0);
-  }, [plannerPrediction, plannerGrade, plannerCount, currentReferenceGrade, settings]);
-
-  // Worked example for the settings page, built around your current max grade.
-  const acwrExample = useMemo(() => {
-    const problems = 24;
-    const duration = 120;
-    const reference = currentReferenceGrade;
-    const baseGrade = gradeFromNumber(gradeToNumber(reference) - 1);
-    const hardGrade = gradeFromNumber(gradeToNumber(baseGrade) + 2);
-    const acuteWindow = settings.model.acwr.acuteWindow;
-    const chronicWindow = settings.model.acwr.chronicWindow;
-    const acuteAlpha = 2 / (acuteWindow + 1);
-    const chronicAlpha = 2 / (chronicWindow + 1);
-
-    const points = calculateGradeIntensity(baseGrade, reference, settings);
-    const speed = calculateSpeedMultiplier(problems, duration, settings);
-    const load = problems * points * speed;
-    // Steady routine of two such sessions a week: both averages sit at 2/7 of a session's load.
-    const prevAcute = (load * 2) / 7;
-    const prevChronic = (load * 2) / 7;
-
-    function projectAcwr(newLoad: number): number {
-      const acute = acuteAlpha * newLoad + (1 - acuteAlpha) * prevAcute;
-      const chronic = chronicAlpha * newLoad + (1 - chronicAlpha) * prevChronic;
-      return chronic <= 0 ? 0 : acute / chronic;
-    }
-
-    const hardGradeLoad = problems * calculateGradeIntensity(hardGrade, reference, settings) * speed;
-    const fasterPaceLoad = problems * points * calculateSpeedMultiplier(problems, 75, settings);
-    const moreProblemsLoad = 32 * points * calculateSpeedMultiplier(32, duration, settings);
-
-    return {
-      problems,
-      duration,
-      reference,
-      baseGrade,
-      hardGrade,
-      points,
-      speed,
-      load,
-      prevAcute,
-      prevChronic,
-      acuteWindow,
-      chronicWindow,
-      nextAcute: acuteAlpha * load + (1 - acuteAlpha) * prevAcute,
-      nextChronic: chronicAlpha * load + (1 - chronicAlpha) * prevChronic,
-      nextAcwr: projectAcwr(load),
-      hardGradeLoad,
-      fasterPaceLoad,
-      moreProblemsLoad,
-      hardGradeAcwr: projectAcwr(hardGradeLoad),
-      fasterPaceAcwr: projectAcwr(fasterPaceLoad),
-      moreProblemsAcwr: projectAcwr(moreProblemsLoad),
-    };
-  }, [settings, currentReferenceGrade]);
-
-  const gradeCurvePoints = useMemo(
-    () =>
-      GRADES.map((grade) => ({
-        x: gradeToNumber(grade),
-        y: calculateGradeIntensity(grade, currentReferenceGrade, settings),
-      })),
-    [settings, currentReferenceGrade],
-  );
-
-  const speedCurvePoints = useMemo(
-    () =>
-      Array.from({ length: 16 }, (_, index) => {
-        const problemsPerHour = 8 + index * 4;
-        return {
-          x: problemsPerHour,
-          y: calculateSpeedMultiplier(problemsPerHour, 60, settings),
-        };
-      }),
-    [settings],
-  );
-
   const displayGradeLabel = (grade: Grade): string => gradeToDisplay(grade, settings.gradeDisplayUnit);
   const readinessLabel: Record<Readiness["level"], string> = { good: "Ready", fair: "Okay", low: "Take it easy" };
 
@@ -454,7 +290,7 @@ function App() {
       try {
         const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
         if (clientId) {
-          redirectSession = await extractOAuthTokenFromUrl(clientId);
+          redirectSession = await extractOAuthTokenFromUrl();
         }
       } catch (oauthErr) {
         const msg = oauthErr instanceof Error ? oauthErr.message : String(oauthErr);
@@ -522,6 +358,8 @@ function App() {
     }
 
     void bootstrap();
+    // Load data and start background syncs once on mount; later state changes must not re-run this.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -532,30 +370,6 @@ function App() {
     void saveSettings(settings);
   }, [settings, loading]);
 
-  function addProblem(): void {
-    setDraft((previous) => ({
-      ...previous,
-      problems: [
-        ...previous.problems,
-        {
-          id: getId(),
-          count: Math.max(1, Math.min(100, entryCount)),
-          grade: entryGrade,
-          holdType: entryHold,
-          wallAngle: entryAngle,
-          climbedOn: entryDate,
-        },
-      ],
-    }));
-  }
-
-  function removeProblem(problemId: string): void {
-    setDraft((previous) => ({
-      ...previous,
-      problems: previous.problems.filter((problem) => problem.id !== problemId),
-    }));
-  }
-
   function patchSettings(update: (draftValue: AppSettings) => void): void {
     setSettings((previous) => {
       const next = structuredClone(previous);
@@ -564,27 +378,45 @@ function App() {
     });
   }
 
-  function beginEditSession(session: SessionInput): void {
-    setEditingSessionId(session.id);
-    setEditingSessionCreatedAt(session.createdAt);
-    const sessionDateIso = session.createdAt.slice(0, 10); // Extract YYYY-MM-DD from ISO timestamp
-    setDraft({
-      sessionDate: sessionDateIso,
+  function draftFromSession(session: SessionInput): SessionDraft {
+    return {
+      sessionDate: getSessionDayKey(session),
       durationMinutes: session.durationMinutes,
       sleepHours: session.sleepHours,
       sleepQuality: session.sleepQuality ?? 7,
       stress: session.stress,
       motivation: session.motivation,
       problems: session.problems.map((problem) => ({ ...problem })),
-    });
-    setEntryDate(session.problems[0]?.climbedOn ?? todayIsoDate());
-    setTabAndPersist("session");
+    };
+  }
+
+  function beginEditSession(session: SessionInput): void {
+    setEditingSessionId(session.id);
+    setEditDraft(draftFromSession(session));
   }
 
   function cancelEditSession(): void {
     setEditingSessionId(undefined);
-    setEditingSessionCreatedAt(undefined);
-    setDraft(createSessionDraft(settings));
+    setEditDraft(undefined);
+  }
+
+  async function removeSession(session: SessionInput): Promise<void> {
+    const label = formatLongDate(getSessionDayKey(session));
+    if (!window.confirm(`Delete the session of ${label}? This can't be undone.`)) return;
+
+    await deleteSession(session.id);
+    if (session.source === "toplogger" && session.externalId) {
+      const dayId = session.externalId;
+      setSettings((previous) =>
+        clampSettings({
+          ...previous,
+          toplogger: { ...previous.toplogger, ignoredDayIds: [...new Set([...(previous.toplogger.ignoredDayIds ?? []), dayId])] },
+        }),
+      );
+    }
+    setSessions((previous) => previous.filter((item) => item.id !== session.id));
+    cancelEditSession();
+    showNotification(`Deleted the session of ${label}.`);
   }
 
   function getBackupPayload(): DriveBackupPayload {
@@ -613,21 +445,6 @@ function App() {
     downloadBlob(json, `boulder-load-manager-backup-${new Date().toISOString().slice(0,10)}.json`, "application/json");
   }
 
-  function exportBouldersToCSV(): void {
-    const header = "sessionId,createdAt,durationMinutes,sleepHours,stress,motivation,problemId,count,grade,holdType,wallAngle,climbedOn";
-    const rows: string[] = [header];
-    for (const s of sessions) {
-      if (s.problems.length === 0) {
-        rows.push([s.id, s.createdAt, s.durationMinutes, s.sleepHours, s.stress, s.motivation, "", "", "", "", "", ""].join(","));
-      } else {
-        for (const p of s.problems) {
-          rows.push([s.id, s.createdAt, s.durationMinutes, s.sleepHours, s.stress, s.motivation, p.id, p.count, p.grade, p.holdType, p.wallAngle, p.climbedOn ?? ""].join(","));
-        }
-      }
-    }
-    downloadBlob(rows.join("\n"), `bouldering-sessions-${new Date().toISOString().slice(0,10)}.csv`, "text/csv");
-  }
-
   async function importBackupFromJSON(file: File): Promise<void> {
     try {
       const text = await file.text();
@@ -651,30 +468,6 @@ function App() {
       const msg = err instanceof Error ? err.message : String(err);
       addDriveLog(`Error importing backup: ${msg}`);
     }
-  }
-
-  async function importBouldersFromCSV(file: File): Promise<void> {
-    const text = await file.text();
-    const lines = text.split("\n").filter((l) => l.trim());
-    if (lines.length < 2) return;
-    // Group by sessionId
-    const sessionMap = new Map<string, SessionInput>();
-    for (const line of lines.slice(1)) {
-      const cols = line.split(",");
-      const [sid, createdAt, durationMinutes, sleepHours, stress, motivation, problemId, count, grade, holdType, wallAngle, climbedOn] = cols;
-      if (!sid) continue;
-      if (!sessionMap.has(sid)) {
-        sessionMap.set(sid, { id: sid, createdAt, durationMinutes: Number(durationMinutes), sleepHours: Number(sleepHours), stress: Number(stress), motivation: Number(motivation), problems: [] });
-      }
-      if (problemId && grade) {
-        sessionMap.get(sid)!.problems.push({ id: problemId, count: Number(count), grade: grade as Grade, holdType: holdType as HoldType, wallAngle: wallAngle as WallAngle, climbedOn: climbedOn || undefined });
-      }
-    }
-    for (const session of sessionMap.values()) {
-      await saveSession(session);
-    }
-    const updated = await loadSessions();
-    setSessions(updated.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()));
   }
 
   async function applyDriveBackup(token: string): Promise<void> {
@@ -813,6 +606,7 @@ function App() {
       let updated = 0;
 
       for (const day of days) {
+        if (settingsForSync.toplogger.ignoredDayIds?.includes(day.id)) continue;
         const synced = topLoggerDayToSession(day, settingsForSync);
         if (!synced) continue;
 
@@ -960,54 +754,52 @@ function App() {
     void syncFitNotesFromDrive(token, settings, false);
   }
 
-  async function saveCurrentSession(): Promise<void> {
-    if (draft.problems.length === 0) {
+  async function saveDraft(draftValue: SessionDraft, existing?: SessionInput): Promise<void> {
+    if (draftValue.problems.length === 0) {
       return;
     }
 
-    const isEditing = Boolean(editingSessionId);
-
-    // Convert session date (YYYY-MM-DD) to ISO timestamp at noon UTC
-    const sessionDateIso = `${draft.sessionDate}T12:00:00Z`;
-
-    const original = isEditing ? sessions.find((item) => item.id === editingSessionId) : undefined;
     const session: SessionInput = {
-      id: editingSessionId ?? getId(),
-      createdAt: editingSessionCreatedAt ?? sessionDateIso,
-      durationMinutes: draft.durationMinutes,
-      sleepHours: draft.sleepHours,
-      sleepQuality: draft.sleepQuality,
-      stress: draft.stress,
-      motivation: draft.motivation,
-      problems: draft.problems,
-      source: original?.source ?? "manual",
-      externalId: original?.externalId,
-      locallyEdited: original?.source === "toplogger" ? true : undefined,
+      id: existing?.id ?? getId(),
+      createdAt: `${draftValue.sessionDate}T12:00:00Z`,
+      durationMinutes: draftValue.durationMinutes,
+      sleepHours: draftValue.sleepHours,
+      sleepQuality: draftValue.sleepQuality,
+      stress: draftValue.stress,
+      motivation: draftValue.motivation,
+      problems: draftValue.problems.map((problem) => ({ ...problem, climbedOn: draftValue.sessionDate })),
+      source: existing?.source ?? "manual",
+      externalId: existing?.externalId,
+      toplogger: existing?.toplogger,
+      locallyEdited: existing?.source === "toplogger" ? true : undefined,
     };
 
-    const highestLoggedGrade = session.problems.reduce((max, item) => {
-      const score = gradeToNumber(item.grade);
-      return Math.max(max, score);
-    }, gradeToNumber(settings.climberMaxGrade));
-
-    let nextSettings = settings;
+    // The fallback max grade (used before there is history) follows the hardest grade you log.
+    const highestLoggedGrade = session.problems.reduce(
+      (max, item) => Math.max(max, gradeToNumber(item.grade)),
+      gradeToNumber(settings.climberMaxGrade),
+    );
     if (highestLoggedGrade > gradeToNumber(settings.climberMaxGrade)) {
-      const upgraded = `V${highestLoggedGrade}` as Grade;
-      nextSettings = clampSettings({ ...settings, climberMaxGrade: upgraded });
+      const nextSettings = clampSettings({ ...settings, climberMaxGrade: `V${highestLoggedGrade}` as Grade });
       setSettings(nextSettings);
       await saveSettings(nextSettings);
     }
 
-    const updatedSessions = isEditing
-      ? sessions.map((item) => (item.id === session.id ? session : item))
-      : [session, ...sessions];
-
     await saveSession(session);
-    setSessions(updatedSessions.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()));
-    setDraft(createSessionDraft(nextSettings));
-    setEditingSessionId(undefined);
-    setEditingSessionCreatedAt(undefined);
-    setTabAndPersist("dashboard");
+    setSessions((previous) =>
+      [session, ...previous.filter((item) => item.id !== session.id)].sort(
+        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+      ),
+    );
+
+    if (existing) {
+      cancelEditSession();
+      showNotification(`Updated the session of ${formatLongDate(draftValue.sessionDate)}.`);
+    } else {
+      setDraft(createSessionDraft(settings));
+      showNotification("Session saved. Here's where it puts you.");
+      setTabAndPersist("bouldering");
+    }
   }
 
   if (loading) {
@@ -1074,10 +866,16 @@ function App() {
                   }[getAcwrZoneKey(overallAcwr, settings.model.acwr.lowThreshold, settings.model.acwr.highThreshold)]}
             </h1>
             <p className="hero-sub">
-              Capacity range for your current max of {displayGradeLabel(currentReferenceGrade)}:{" "}
-              <strong>
-                {displayGradeLabel(gradeFromNumber(capacityRange.min))} – {displayGradeLabel(gradeFromNumber(capacityRange.max))}
-              </strong>
+              {recommendation === null
+                ? "Log or sync a session to get started."
+                : recommendation.restDays > 0
+                  ? `Next: rest ${recommendation.restDays} day${recommendation.restDays === 1 ? "" : "s"}, then a light session.`
+                  : recommendation.options.find((option) => option.key === "high")?.available
+                    ? "Room for any kind of session today."
+                    : "Room for a volume or medium session today."}{" "}
+              <button type="button" className="link-button hero-link" onClick={() => setTabAndPersist("bouldering")}>
+                See what to climb
+              </button>
             </p>
           </div>
           <div className="stat-tiles">
@@ -1120,10 +918,11 @@ function App() {
 
       <nav className="tab-nav" aria-label="Main tabs">
         {([
-          ["session", "Session"],
-          ["dashboard", "Dashboard"],
+          ["bouldering", "Bouldering"],
           ["strength", "Strength"],
+          ["session", "Sessions"],
           ["history", "History"],
+          ["guide", "Guide"],
           ["settings", "Settings"],
         ] as const).map(([name, label]) => (
           <button
@@ -1141,248 +940,36 @@ function App() {
 
       {tab === "session" && (
         <section className="panel-grid">
-          <TopLoggerPanel
-            settings={settings}
-            patchSettings={patchSettings}
-            auth={toploggerAuth}
-            status={toploggerStatus}
-            syncing={toploggerSyncing}
-            onConnect={(refreshToken) => void handleTopLoggerConnect(refreshToken)}
-            onDisconnect={handleTopLoggerDisconnect}
-            onSync={() => {
-              if (toploggerAuth) void syncTopLogger(toploggerAuth, settings);
-            }}
-          />
-          <article className="panel">
-            <h2>Add problems</h2>
-            <div className="field-grid">
-              <label>
-                Date
-                <input
-                  type="date"
-                  value={entryDate}
-                  onChange={(event) => setEntryDate(event.target.value)}
-                />
-              </label>
-              <label>
-                Problems (1-100)
-                <NumberInput
-                  value={entryCount}
-                  min={1}
-                  max={100}
-                  step={1}
-                  onCommit={(value) => setEntryCount(Math.round(value))}
-                />
-              </label>
-              <label>
-                Grade
-                <select value={entryGrade} onChange={(event) => setEntryGrade(event.target.value as Grade)}>
-                  {GRADES.map((grade) => (
-                    <option key={grade} value={grade}>
-                      {displayGradeLabel(grade)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Hold type
-                <select value={entryHold} onChange={(event) => setEntryHold(event.target.value as HoldType)}>
-                  {HOLD_TYPES.map((holdType) => (
-                    <option key={holdType} value={holdType}>
-                      {holdType}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Wall angle
-                <select value={entryAngle} onChange={(event) => setEntryAngle(event.target.value as WallAngle)}>
-                  {WALL_ANGLES.map((angle) => (
-                    <option key={angle} value={angle}>
-                      {angle}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-            <button type="button" className="primary" onClick={addProblem}>Add to session</button>
-          </article>
-
-          <article className="panel">
-            <h2>How did it feel?</h2>
-            {editingSessionId && (
-              <p>
-                Editing an existing session. Saving updates it in your history.
-              </p>
-            )}
-            <div className="field-grid">
-              <label>
-                Session date
-                <input
-                  type="date"
-                  value={draft.sessionDate}
-                  onChange={(event) =>
-                    setDraft((previous) => ({ ...previous, sessionDate: event.target.value }))
-                  }
-                />
-              </label>
-              <label>
-                Duration (minutes)
-                <NumberInput
-                  value={draft.durationMinutes}
-                  min={10}
-                  step={1}
-                  onCommit={(value) =>
-                    setDraft((previous) => ({ ...previous, durationMinutes: Math.round(value) }))
-                  }
-                />
-              </label>
-              <label>
-                Sleep before session (hours)
-                <NumberInput
-                  value={draft.sleepHours}
-                  min={0}
-                  max={12}
-                  step={0.25}
-                  onCommit={(value) => setDraft((previous) => ({ ...previous, sleepHours: value }))}
-                />
-              </label>
-              <label>
-                Sleep quality (10 = great)
-                <select
-                  value={draft.sleepQuality}
-                  onChange={(event) => {
-                    const value = Number(event.target.value);
-                    setDraft((previous) => ({ ...previous, sleepQuality: value }));
-                  }}
-                >
-                  {Array.from({ length: 10 }, (_, index) => index + 1).map((value) => (
-                    <option key={`quality-${value}`} value={value}>
-                      {value}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Stress ({settings.stressScaleMax} max)
-                <select
-                  value={draft.stress}
-                  onChange={(event) => {
-                    const value = Number(event.target.value);
-                    setDraft((previous) => ({ ...previous, stress: value }));
-                  }}
-                >
-                  {Array.from({ length: settings.stressScaleMax }, (_, index) => index + 1).map((value) => (
-                    <option key={`stress-${value}`} value={value}>
-                      {value}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Motivation ({settings.motivationScaleMax} max)
-                <select
-                  value={draft.motivation}
-                  onChange={(event) => {
-                    const value = Number(event.target.value);
-                    setDraft((previous) => ({ ...previous, motivation: value }));
-                  }}
-                >
-                  {Array.from({ length: settings.motivationScaleMax }, (_, index) => index + 1).map((value) => (
-                    <option key={`motivation-${value}`} value={value}>
-                      {value}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-
-            <div className="session-summary">
-              {estimatedLoad && (
-                <p>
-                  Estimated load <strong>{estimatedLoad.totalLoad.toFixed(0)}</strong>
-                  <span className="muted-inline">
-                    {" "}· pace ×{estimatedLoad.speedMultiplier.toFixed(2)} · measured against {displayGradeLabel(estimatedLoad.referenceGrade)}
-                  </span>
-                </p>
-              )}
-              <ReadinessNote readiness={draftReadiness} label={readinessLabel[draftReadiness.level]} />
-            </div>
-
-            <div className="metric-row">
-              <button type="button" className="primary" onClick={() => void saveCurrentSession()} disabled={draft.problems.length === 0}>
-                {editingSessionId ? "Update session" : "Save session"}
-              </button>
-              {editingSessionId && (
-                <button type="button" onClick={cancelEditSession}>
-                  Cancel edit
-                </button>
-              )}
-            </div>
-          </article>
-
           <article className="panel full-width">
-            <div className="panel-header-row">
-              <h2>This session</h2>
-              <span className="count-chip">{totalProblems} problem{totalProblems === 1 ? "" : "s"}</span>
+            <div className="panel-heading">
+              <h2>Log a session</h2>
+              <p className="muted-hint">
+                Climbing at a TopLogger gym? Those sessions sync by themselves on the{" "}
+                <button type="button" className="link-button" onClick={() => setTabAndPersist("bouldering")}>
+                  Bouldering tab
+                </button>
+                . Use this for anything else.
+              </p>
             </div>
-            {draft.problems.length === 0 && <p>No problems logged yet.</p>}
-            {draft.problems.length > 0 && (
-              <table>
-                <thead>
-                  <tr>
-                    <th>Date</th>
-                    <th>Count</th>
-                    <th>Grade</th>
-                    <th>Hold</th>
-                    <th>Angle</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {draft.problems.map((problem) => (
-                    <tr key={problem.id}>
-                      <td>{problem.climbedOn ?? todayIsoDate()}</td>
-                      <td>{problem.count}</td>
-                      <td>{displayGradeLabel(problem.grade)}</td>
-                      <td>{problem.holdType}</td>
-                      <td>{problem.wallAngle}</td>
-                      <td>
-                        <button
-                          type="button"
-                          className="danger"
-                          onClick={() => removeProblem(problem.id)}
-                        >
-                          Remove
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
+            <SessionForm
+              draft={draft}
+              onChange={setDraft}
+              settings={settings}
+              displayGrade={displayGradeLabel}
+              estimatedLoad={estimateDraftLoad(draft)}
+              readiness={assessReadiness(draft.sleepHours, draft.sleepQuality, draft.stress, settings, draft.motivation)}
+              readinessLabel={readinessLabel[assessReadiness(draft.sleepHours, draft.sleepQuality, draft.stress, settings, draft.motivation).level]}
+              onSave={() => void saveDraft(draft)}
+              onCancel={draft.problems.length > 0 ? () => setDraft(createSessionDraft(settings)) : undefined}
+              saveLabel="Save session"
+              defaultGrade={gradeFromNumber(gradeToNumber(currentReferenceGrade) - 2)}
+            />
           </article>
         </section>
       )}
 
-      {tab === "dashboard" && (
+      {tab === "bouldering" && (
         <section className="panel-grid">
-          <div className="filter-row full-width">
-            <span className="filter-label">Range</span>
-            <RangePills
-              label="Chart date range"
-              value={historyRange}
-              onChange={setHistoryRange}
-              options={[
-                { value: 14, label: "2 wk" },
-                { value: 28, label: "4 wk" },
-                { value: 90, label: "3 mo" },
-                { value: 180, label: "6 mo" },
-                { value: null, label: "All" },
-              ]}
-            />
-          </div>
-
           <article className="panel">
             <h2>Bouldering ACWR</h2>
             {overallAcwr === null ? (
@@ -1403,10 +990,7 @@ function App() {
                 )}
               </div>
             )}
-          </article>
-
-          <article className="panel">
-            <h2>This week on the wall</h2>
+            <h3 className="facts-heading">This week on the wall</h3>
             <dl className="fact-list">
               <div>
                 <dt>Load, last 7 days</dt>
@@ -1446,10 +1030,54 @@ function App() {
             </dl>
           </article>
 
+          <TopLoggerPanel
+            settings={settings}
+            patchSettings={patchSettings}
+            auth={toploggerAuth}
+            status={toploggerStatus}
+            syncing={toploggerSyncing}
+            onConnect={(refreshToken) => void handleTopLoggerConnect(refreshToken)}
+            onDisconnect={handleTopLoggerDisconnect}
+            onSync={() => {
+              if (toploggerAuth) void syncTopLogger(toploggerAuth, settings);
+            }}
+          />
+
+          <BoulderingModelCard settings={settings} patchSettings={patchSettings} referenceGrade={currentReferenceGrade} />
+
           <article className="panel full-width">
             <div className="panel-heading">
-              <h2>ACWR over time</h2>
-              <p className="muted-hint">Acute ÷ chronic EWMA of your daily bouldering load. Hover or use the arrow keys for details.</p>
+              <h2>What to climb next</h2>
+              <p className="muted-hint">
+                Three ways to spend the load that keeps you in the green zone, as grades and attempts.
+              </p>
+            </div>
+            <RecommendationCard
+              recommendation={recommendation}
+              settings={settings}
+              displayGrade={displayGradeLabel}
+              referenceGrade={currentReferenceGrade}
+            />
+          </article>
+
+          <article className="panel full-width">
+            <div className="panel-header-row">
+              <div className="panel-heading">
+                <h2>Bouldering ACWR over time</h2>
+                <p className="muted-hint">Acute ÷ chronic EWMA of your daily bouldering load. Hover or use the arrow keys for details.</p>
+              </div>
+              <RangePills
+                label="Bouldering chart range"
+                value={historyRange}
+                onChange={setHistoryRange}
+                options={[
+                  { value: 14, label: "2 wk" },
+                  { value: 28, label: "4 wk" },
+                  { value: 90, label: "3 mo" },
+                  { value: 180, label: "6 mo" },
+                  { value: null, label: "All" },
+                ]}
+              />
             </div>
             {sessionHistory.length < 2 ? (
               <p className="empty-note">Log at least 2 sessions to see the history graph.</p>
@@ -1459,6 +1087,7 @@ function App() {
                 lowThreshold={settings.model.acwr.lowThreshold}
                 highThreshold={settings.model.acwr.highThreshold}
                 targetAcwr={settings.model.acwr.targetAcwr}
+                loadLabel="Daily bouldering load"
               />
             )}
           </article>
@@ -1466,16 +1095,16 @@ function App() {
           <article className="panel full-width">
             <div className="panel-heading">
               <h2>Rolling load totals</h2>
-              <p className="muted-hint">Total load over the previous 7, 14 and 28 days, for each day in the range.</p>
+              <p className="muted-hint">Total load over the previous 7, 14 and 28 days, for each day in the range above.</p>
             </div>
             <LoadTotalsChart history={fullSessionHistory} rangeDays={historyRange} />
           </article>
 
           {/* Next-session planner */}
           <article className="panel full-width">
-            <h2>Plan your next session</h2>
+            <h2>Try your own session</h2>
             <p className="muted-hint">
-              See what ACWR a session would bring you to. Days until the planned date count as rest. Target:{" "}
+              Enter any session to see what ACWR it would bring you to. Days until the planned date count as rest. Target:{" "}
               <strong>{settings.model.acwr.targetAcwr.toFixed(2)}</strong>.
             </p>
             {plannerPrediction === null ? (
@@ -1538,49 +1167,6 @@ function App() {
                 </div>
                 <ReadinessNote readiness={plannerReadiness} label={readinessLabel[plannerReadiness.level]} />
 
-                {plannerPrediction && Object.keys(gradeDistribution).length > 0 && (
-                  <div className="grade-distribution">
-                    <h3>Same load, one grade</h3>
-                    <p className="muted-hint">How many boulders of a single grade give the same load ({plannerPrediction.actualLoad.toFixed(0)}).</p>
-                    {(() => {
-                      // Grades far below your max need absurd counts to match the load, so show the useful range.
-                      const maxNumber = gradeToNumber(currentReferenceGrade);
-                      const grades = GRADES.filter(
-                        (grade) =>
-                          gradeDistribution[grade] > 0 &&
-                          gradeToNumber(grade) >= maxNumber - 4 &&
-                          gradeToNumber(grade) <= maxNumber + 2,
-                      );
-                      return (
-                        <ColumnChart
-                          ariaLabel="Boulders needed per grade for the same load"
-                          labels={grades.map((grade) => gradeToDisplay(grade, settings.gradeDisplayUnit))}
-                          titles={grades.map((grade) => `Only ${gradeToDisplay(grade, settings.gradeDisplayUnit)}`)}
-                          values={grades.map((grade) => gradeDistribution[grade])}
-                          color="var(--series-1)"
-                          seriesLabel="boulders"
-                          height={210}
-                          formatValue={(value) => value.toFixed(0)}
-                        />
-                      );
-                    })()}
-                  </div>
-                )}
-
-                {boulderDistribution.length > 0 && (
-                  <div className="grade-distribution">
-                    <h3>Suggested mix</h3>
-                    <p className="muted-hint">Distribute your {plannerCount} boulders across grades to hit {plannerPrediction.actualLoad.toFixed(0)} load:</p>
-                    <div className="boulder-breakdown">
-                      {boulderDistribution.map((item, idx) => (
-                        <div key={idx} className="breakdown-item">
-                          <strong>{item.count}×</strong> {gradeToDisplay(item.grade, settings.gradeDisplayUnit)}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                
               </>
             )}
           </article>
@@ -1594,6 +1180,16 @@ function App() {
               </p>
             </div>
             <WellnessCharts weeks={weeklyWellness} personalMaxSleep={settings.model.recovery.personalMaxSleepHours} />
+          </article>
+
+          <article className="panel full-width">
+            <div className="panel-heading">
+              <h2>By grade, last 4 weeks</h2>
+              <p className="muted-hint">
+                Attempts are problems you climbed. Points are measured against your current max of {displayGradeLabel(currentReferenceGrade)}.
+              </p>
+            </div>
+            <GradeBreakdownTable sessions={sessions} settings={settings} referenceGrade={currentReferenceGrade} />
           </article>
         </section>
       )}
@@ -1616,7 +1212,7 @@ function App() {
             <h2>Profile</h2>
             <div className="field-grid">
               <label>
-                Max grade
+                Starting max grade
                 <select
                   value={settings.climberMaxGrade}
                   onChange={(event) =>
@@ -1646,112 +1242,16 @@ function App() {
                   <option value="font">Font</option>
                 </select>
               </label>
-              <label>
-                Stress scale max
-                <NumberInput
-                  value={settings.stressScaleMax}
-                  min={3}
-                  max={20}
-                  step={1}
-                  onCommit={(value) =>
-                    patchSettings((next) => {
-                      next.stressScaleMax = Math.round(value);
-                    })
-                  }
-                />
-              </label>
-              <label>
-                Motivation scale max
-                <NumberInput
-                  value={settings.motivationScaleMax}
-                  min={3}
-                  max={20}
-                  step={1}
-                  onCommit={(value) =>
-                    patchSettings((next) => {
-                      next.motivationScaleMax = Math.round(value);
-                    })
-                  }
-                />
-              </label>
             </div>
+            <p className="muted-hint">
+              The starting max grade is only used until you have history; after that your current max comes from what you climb.
+            </p>
           </article>
 
           <article className="panel">
-            <h2>Model tuning</h2>
+            <h2>Zones &amp; targets</h2>
+            <p className="muted-hint">Shared by bouldering and strength. Load model settings live on their own tabs.</p>
             <div className="field-grid">
-              <label>
-                Points per problem at your max grade
-                <NumberInput
-                  value={settings.model.gradeIntensity.basePoints}
-                  min={1}
-                  max={100}
-                  step={1}
-                  onCommit={(value) =>
-                    patchSettings((next) => {
-                      next.model.gradeIntensity.basePoints = value;
-                    })
-                  }
-                />
-              </label>
-              <label>
-                Multiplier per grade
-                <NumberInput
-                  value={settings.model.gradeIntensity.multiplierPerGrade}
-                  min={1.1}
-                  max={3}
-                  step={0.05}
-                  onCommit={(value) =>
-                    patchSettings((next) => {
-                      next.model.gradeIntensity.multiplierPerGrade = value;
-                    })
-                  }
-                />
-              </label>
-              <label>
-                Speed impact (% increase at 1 min/boulder)
-                <input
-                  type="range"
-                  min="0"
-                  max="100"
-                  step="1"
-                  value={settings.model.speed.impactPercent}
-                  onChange={(e) =>
-                    patchSettings((next) => {
-                      next.model.speed.impactPercent = Number(e.target.value);
-                    })
-                  }
-                />
-                <span className="range-value">{settings.model.speed.impactPercent}%</span>
-              </label>
-              <label>
-                ACWR acute window (days)
-                <NumberInput
-                  value={settings.model.acwr.acuteWindow}
-                  min={3}
-                  max={60}
-                  step={1}
-                  onCommit={(value) =>
-                    patchSettings((next) => {
-                      next.model.acwr.acuteWindow = Math.round(value);
-                    })
-                  }
-                />
-              </label>
-              <label>
-                ACWR chronic window (days)
-                <NumberInput
-                  value={settings.model.acwr.chronicWindow}
-                  min={3}
-                  max={60}
-                  step={1}
-                  onCommit={(value) =>
-                    patchSettings((next) => {
-                      next.model.acwr.chronicWindow = Math.round(value);
-                    })
-                  }
-                />
-              </label>
               <label>
                 ACWR low threshold
                 <NumberInput
@@ -1781,7 +1281,7 @@ function App() {
                 />
               </label>
               <label>
-                ACWR planner target
+                ACWR target
                 <input
                   type="range"
                   min={0.8}
@@ -1811,54 +1311,53 @@ function App() {
                 />
               </label>
             </div>
-            <button type="button" className="danger" onClick={() => setSettings(DEFAULT_SETTINGS)}>
-              Reset all settings to default
-            </button>
-
-          </article>
-
-          <article className="panel">
-            <h2>Grade intensity</h2>
-            <p className="muted-hint">
-              Points per problem, measured against your current max of <strong>{displayGradeLabel(currentReferenceGrade)}</strong>: the
-              hardest grade you've logged on at least two days in the past year. Each grade up multiplies by{" "}
-              {settings.model.gradeIntensity.multiplierPerGrade.toFixed(2)}.
-            </p>
-            <div className="table-scroll">
-            <table className="grade-conversion-table">
-              <thead>
-                <tr>
-                  <th>Grade</th>
-                  <th>Points</th>
-                  <th>vs. your max</th>
-                </tr>
-              </thead>
-              <tbody>
-                {GRADES.map((g) => {
-                  const intensity = calculateGradeIntensity(g, currentReferenceGrade, settings);
-                  const relative = intensity / settings.model.gradeIntensity.basePoints;
-                  return (
-                    <tr key={g} className={g === currentReferenceGrade ? "highlight-row" : undefined}>
-                      <td>{gradeToDisplay(g, settings.gradeDisplayUnit)}</td>
-                      <td className="num">{intensity < 10 ? intensity.toFixed(2) : intensity.toFixed(1)}</td>
-                      <td className="num">{relative.toFixed(2)}×</td>
-                    </tr>
+            <button
+              type="button"
+              className="danger"
+              onClick={() => {
+                if (window.confirm("Reset every setting to its default? Your sessions and strength data are kept.")) {
+                  // Keep sync bookkeeping so a reset doesn't re-import deleted TopLogger days or re-download FitNotes.
+                  setSettings((previous) =>
+                    clampSettings({
+                      ...DEFAULT_SETTINGS,
+                      toplogger: { ...DEFAULT_SETTINGS.toplogger, lastSyncedAt: previous.toplogger.lastSyncedAt, ignoredDayIds: previous.toplogger.ignoredDayIds },
+                      fitnotes: { ...DEFAULT_SETTINGS.fitnotes, lastImport: previous.fitnotes.lastImport },
+                    }),
                   );
-                })}
-              </tbody>
-            </table>
-            </div>
-
+                }
+              }}
+            >
+              Reset settings to default
+            </button>
           </article>
 
           <article className="panel">
-            <h2>Data &amp; sync</h2>
-            <h3>Export / import</h3>
-            <p>Download complete backup as JSON, or re-import to restore all data (same format as Google Drive).</p>
+            <h2>Google Drive backup</h2>
+            {driveSession ? (
+              <>
+                <p className="muted-hint">{driveStatus}</p>
+                <div className="metric-row">
+                  <button type="button" className="primary" onClick={() => void handleDriveUpload()}>
+                    Back up to Drive
+                  </button>
+                  <button type="button" onClick={() => void handleDriveRestore()}>
+                    Restore from Drive
+                  </button>
+                </div>
+                <p className="muted-hint">The last 5 backups are kept in your Drive. Restoring replaces what is in this browser.</p>
+              </>
+            ) : (
+              <p className="muted-hint">Sign in with Google (top right) to back up to and restore from your own Drive.</p>
+            )}
+          </article>
+
+          <article className="panel">
+            <h2>Backup file</h2>
+            <p className="muted-hint">Everything in one JSON file: sessions, strength sets and settings.</p>
             <div className="metric-row">
-              <button type="button" onClick={exportBackupAsJSON}>Export backup (JSON)</button>
+              <button type="button" onClick={exportBackupAsJSON}>Export backup</button>
               <label className="file-import-label">
-                Import backup (JSON)
+                Import backup
                 <input type="file" accept=".json" className="hidden-file-input" onChange={(e) => {
                   const file = e.target.files?.[0];
                   if (file) void importBackupFromJSON(file);
@@ -1866,205 +1365,112 @@ function App() {
                 }} />
               </label>
             </div>
-            <details>
-              <summary>Bouldering CSV (legacy)</summary>
-              <div className="metric-row">
-                <button type="button" onClick={exportBouldersToCSV}>Export bouldering CSV</button>
-              </div>
-              <div className="import-row">
-                <label className="file-import-label">
-                  Import bouldering CSV
-                  <input type="file" accept=".csv" className="hidden-file-input" onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (file) void importBouldersFromCSV(file);
-                    e.target.value = "";
-                  }} />
-                </label>
-              </div>
-            </details>
-
-            <h3>Google Drive Sync</h3>
-            <p>{driveStatus}</p>
-            <p>
-              Current origin: <strong>{window.location.origin}</strong>
-            </p>
-            <div className="metric-row">
-              <button type="button" onClick={() => connectGoogleDrive()}>
-                Connect Google Drive
-              </button>
-              <button type="button" onClick={disconnectGoogleDrive}>
-                Disconnect
-              </button>
-              <button type="button" onClick={() => void handleDriveUpload()}>
-                Upload Backup
-              </button>
-              <button type="button" onClick={() => void handleDriveRestore()}>
-                Restore Backup
-              </button>
-            </div>
-            {driveLog.length > 0 && (
-              <div className="drive-log">
-                <div className="drive-log-header">
-                  <span>Auth log</span>
-                  <button type="button" className="drive-log-clear" onClick={() => setDriveLog([])}>Clear</button>
-                </div>
-                {driveLog.map((entry, i) => <p key={i} className="drive-log-entry">{entry}</p>)}
-              </div>
-            )}
-
           </article>
 
-          <article className="panel full-width">
-            <h2>How the maths works</h2>
-            <h3>A worked example</h3>
-            <div className="math-steps">
-              <p>
-                Say you climb {acwrExample.problems} × {displayGradeLabel(acwrExample.baseGrade)} in {acwrExample.duration} minutes, with a current
-                max of {displayGradeLabel(acwrExample.reference)}, and you've been doing two of those a week.
-              </p>
-              <p>
-                <span className="math-label">Points per problem</span>
-                {settings.model.gradeIntensity.basePoints} × {settings.model.gradeIntensity.multiplierPerGrade.toFixed(2)}
-                <sup>{gradeToNumber(acwrExample.baseGrade) - gradeToNumber(acwrExample.reference)}</sup> = {acwrExample.points.toFixed(2)}
-              </p>
-              <p>
-                <span className="math-label">Session load</span>
-                {acwrExample.problems} × {acwrExample.points.toFixed(2)} × pace {acwrExample.speed.toFixed(2)} = <strong>{acwrExample.load.toFixed(0)}</strong>
-              </p>
-              <p>
-                <span className="math-label">Acute ({acwrExample.acuteWindow} d)</span>
-                α·load + (1 − α)·previous = {acwrExample.nextAcute.toFixed(1)}
-              </p>
-              <p>
-                <span className="math-label">Chronic ({acwrExample.chronicWindow} d)</span>
-                α·load + (1 − α)·previous = {acwrExample.nextChronic.toFixed(1)}
-              </p>
-              <p>
-                <span className="math-label">ACWR</span>
-                {acwrExample.nextAcute.toFixed(1)} ÷ {acwrExample.nextChronic.toFixed(1)} = <strong>{acwrExample.nextAcwr.toFixed(2)}</strong>
-              </p>
-              <p className="muted-hint">α = 2 ÷ (window + 1). Sleep and stress don't enter the load; they show up as readiness.</p>
-            </div>
-
-            <h3>How much each day counts</h3>
-            <p className="muted-hint">How much each past day weighs in your acute and chronic averages. The acute one reacts fast; the chronic one remembers longer.</p>
-            <EwmaWeightsChart acuteWindow={settings.model.acwr.acuteWindow} chronicWindow={settings.model.acwr.chronicWindow} />
-
-            <h3>Model curves</h3>
-            <div className="curve-grid">
-              <CurveChart
-                title="Grade intensity"
-                xLabel="Grade"
-                points={gradeCurvePoints}
-                color="var(--series-1)"
-                xFormatter={(value) => gradeToDisplay(gradeFromNumber(value), settings.gradeDisplayUnit)}
-                yFormatter={formatCompact}
-                yLog
-              />
-              <CurveChart
-                title="Speed multiplier"
-                xLabel="Problems per hour"
-                points={speedCurvePoints}
-                color="var(--series-2)"
-                xFormatter={(value) => value.toFixed(0)}
-                yFormatter={(value) => `${value.toFixed(2)}x`}
-              />
-            </div>
-
-            <div className="example-grid">
-              <article className="math-card">
-                <h4>Two grades harder ({displayGradeLabel(acwrExample.baseGrade)} → {displayGradeLabel(acwrExample.hardGrade)})</h4>
-                <p>Load {acwrExample.hardGradeLoad.toFixed(0)} · ACWR {acwrExample.hardGradeAcwr.toFixed(2)}</p>
-              </article>
-              <article className="math-card">
-                <h4>Faster ({acwrExample.duration} → 75 min)</h4>
-                <p>Load {acwrExample.fasterPaceLoad.toFixed(0)} · ACWR {acwrExample.fasterPaceAcwr.toFixed(2)}</p>
-              </article>
-              <article className="math-card">
-                <h4>More problems ({acwrExample.problems} → 32)</h4>
-                <p>Load {acwrExample.moreProblemsLoad.toFixed(0)} · ACWR {acwrExample.moreProblemsAcwr.toFixed(2)}</p>
-              </article>
-            </div>
-          </article>
         </section>
       )}
+
+      {tab === "guide" && <GuideTab settings={settings} referenceGrade={currentReferenceGrade} />}
 
       {tab === "history" && (
         <section className="panel-grid">
           <article className="panel full-width">
-            <h2>Bouldering sessions</h2>
-            {sessions.length === 0 && <p>No sessions saved yet.</p>}
+            <div className="panel-heading">
+              <h2>Bouldering sessions</h2>
+              <p className="muted-hint">Edit opens the session right here. Synced sessions you edit or delete stay that way on the next sync.</p>
+            </div>
+            {sessions.length === 0 && <p className="empty-note">No sessions saved yet.</p>}
             {sessions.length > 0 && (
-              <table>
-                <thead>
-                  <tr>
-                    <th>Date</th>
-                    <th>Problems</th>
-                    <th>Grades</th>
-                    <th>Duration</th>
-                    <th>Sleep</th>
-                    <th>Stress</th>
-                    <th>Motivation</th>
-                    <th>Source</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {sessions.map((session) => {
-                    const count = session.problems.reduce((sum, problem) => sum + problem.count, 0);
-                    const climbingDates = Array.from(
-                      new Set(session.problems.map((problem) => problem.climbedOn).filter(Boolean)),
-                    ) as string[];
-                    const climbingDateLabel =
-                      climbingDates.length === 0
-                        ? "-"
-                        : climbingDates.length === 1
-                          ? climbingDates[0]
-                          : `${climbingDates[0]} to ${climbingDates[climbingDates.length - 1]}`;
-                    
-                    const gradesLabel = session.problems.length === 0 
-                      ? "-"
-                      : Array.from(new Set(session.problems.map((p) => gradeToDisplay(p.grade, settings.gradeDisplayUnit)))).sort().join(", ");
+              <div className="table-scroll">
+                <table className="history-table">
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Problems</th>
+                      <th>Grades</th>
+                      <th>Duration</th>
+                      <th>Sleep</th>
+                      <th>Stress</th>
+                      <th>Source</th>
+                      <th aria-label="Actions"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sessions.map((session) => {
+                      const count = session.problems.reduce((sum, problem) => sum + problem.count, 0);
+                      const grades = [...new Set(session.problems.map((problem) => problem.grade))].sort(
+                        (a, b) => gradeToNumber(b) - gradeToNumber(a),
+                      );
+                      const isEditing = editingSessionId === session.id && editDraft !== undefined;
 
-                    return (
-                      <tr key={session.id}>
-                        <td className="nowrap">{climbingDateLabel === "-" ? formatLongDate(getSessionDayKey(session)) : climbingDateLabel}</td>
-                        <td>{count}</td>
-                        <td>{gradesLabel}</td>
-                        <td>{session.durationMinutes} min</td>
-                        <td className="nowrap">
-                          {session.sleepHours.toFixed(1)} h{session.sleepQuality !== undefined ? ` · ${session.sleepQuality}/10` : ""}
-                        </td>
-                        <td>{session.stress}</td>
-                        <td>{session.motivation}</td>
-                        <td>
-                          {session.source === "toplogger" ? (
-                            <>
-                              <span className="source-badge" title={session.locallyEdited ? "Edited after sync" : "Synced from TopLogger"}>
-                                TopLogger{session.locallyEdited ? " ✎" : ""}
-                              </span>
-                              {session.toplogger && (
-                                <span className="source-stats">
-                                  {session.toplogger.climbsTried} tried · {session.toplogger.climbsSent} sent ·{" "}
-                                  {session.toplogger.totalTries ?? session.toplogger.loggedTries} tries
-                                  {session.toplogger.gymName ? ` · ${session.toplogger.gymName}` : ""}
-                                </span>
+                      return (
+                        <Fragment key={session.id}>
+                          <tr className={isEditing ? "editing" : undefined}>
+                            <td className="nowrap">{formatLongDate(getSessionDayKey(session))}</td>
+                            <td className="num">{count}</td>
+                            <td>{grades.length === 0 ? "–" : grades.map(displayGradeLabel).join(", ")}</td>
+                            <td className="nowrap">{session.durationMinutes} min</td>
+                            <td className="nowrap">
+                              {session.sleepHours.toFixed(1)} h{session.sleepQuality !== undefined ? ` · ${session.sleepQuality}/10` : ""}
+                            </td>
+                            <td className="num">{session.stress}</td>
+                            <td>
+                              {session.source === "toplogger" ? (
+                                <>
+                                  <span className="source-badge" title={session.locallyEdited ? "Edited after sync" : "Synced from TopLogger"}>
+                                    TopLogger{session.locallyEdited ? " ✎" : ""}
+                                  </span>
+                                  {session.toplogger && (
+                                    <span className="source-stats">
+                                      {session.toplogger.climbsTried} tried · {session.toplogger.climbsSent} sent ·{" "}
+                                      {session.toplogger.totalTries ?? session.toplogger.loggedTries} tries
+                                      {session.toplogger.gymName ? ` · ${session.toplogger.gymName}` : ""}
+                                    </span>
+                                  )}
+                                </>
+                              ) : (
+                                "Manual"
                               )}
-                            </>
-                          ) : (
-                            "Manual"
+                            </td>
+                            <td>
+                              <button
+                                type="button"
+                                className="small"
+                                aria-expanded={isEditing}
+                                onClick={() => (isEditing ? cancelEditSession() : beginEditSession(session))}
+                              >
+                                {isEditing ? "Close" : "Edit"}
+                              </button>
+                            </td>
+                          </tr>
+                          {isEditing && editDraft && (
+                            <tr className="edit-row">
+                              <td colSpan={8}>
+                                <SessionForm
+                                  draft={editDraft}
+                                  onChange={(update) => setEditDraft((previous) => (previous ? update(previous) : previous))}
+                                  settings={settings}
+                                  displayGrade={displayGradeLabel}
+                                  estimatedLoad={estimateDraftLoad(editDraft, session.id)}
+                                  readiness={assessReadiness(editDraft.sleepHours, editDraft.sleepQuality, editDraft.stress, settings, editDraft.motivation)}
+                                  readinessLabel={
+                                    readinessLabel[assessReadiness(editDraft.sleepHours, editDraft.sleepQuality, editDraft.stress, settings, editDraft.motivation).level]
+                                  }
+                                  onSave={() => void saveDraft(editDraft, session)}
+                                  onCancel={cancelEditSession}
+                                  onDelete={() => void removeSession(session)}
+                                  saveLabel="Save changes"
+                                  defaultGrade={grades[0] ?? currentReferenceGrade}
+                                />
+                              </td>
+                            </tr>
                           )}
-                        </td>
-                        <td>
-                          <button type="button" onClick={() => beginEditSession(session)}>
-                            Edit
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+                        </Fragment>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
             )}
           </article>
 

@@ -63,8 +63,9 @@ export function BrandMark() {
 
 const TAB_ICONS: Record<string, React.ReactNode> = {
   session: <path d="M8 3a5 5 0 0 0-5 5v8a5 5 0 0 0 10 0V8a5 5 0 0 0-5-5Zm0 0v6M16 9h5M18.5 6.5v5M15 17h6" />,
-  dashboard: <path d="M3 20h18M5 20l5-9 3 4 3-6 4 11" />,
+  bouldering: <path d="M3 20h18M5 20l5-9 3 4 3-6 4 11" />,
   strength: <path d="M3 9v6M6 7v10M18 7v10M21 9v6M6 12h12" />,
+  guide: <path d="M12 6.5C10 5 7 4.5 3 5v13c4-.5 7 0 9 1.5 2-1.5 5-2 9-1.5V5c-4-.5-7 0-9 1.5Zm0 0V19.5" />,
   history: <path d="M12 7v5l3 2M3.5 12a8.5 8.5 0 1 0 2.5-6M3 4v4h4" />,
   settings: (
     <>

@@ -136,6 +136,8 @@ export interface TopLoggerConfig {
   countMode: TopLoggerCountMode;
   defaultDurationMinutes: number;
   lastSyncedAt?: string;
+  /** TopLogger climb days you deleted here, so syncing doesn't bring them back. */
+  ignoredDayIds?: string[];
 }
 
 export interface FitNotesConfig {

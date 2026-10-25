@@ -75,6 +75,10 @@ export async function saveSession(session: SessionInput): Promise<void> {
   await runTransaction<IDBValidKey>(STORE_SESSIONS, "readwrite", (store) => store.put(session));
 }
 
+export async function deleteSession(sessionId: string): Promise<void> {
+  await runTransaction<undefined>(STORE_SESSIONS, "readwrite", (store) => store.delete(sessionId));
+}
+
 export async function loadSettings(): Promise<AppSettings | undefined> {
   const row = await runTransaction<{ id: string; value: AppSettings } | undefined>(
     STORE_SETTINGS,

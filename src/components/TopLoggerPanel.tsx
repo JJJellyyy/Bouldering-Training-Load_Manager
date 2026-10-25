@@ -28,7 +28,7 @@ export function TopLoggerPanel({
   const config = settings.toplogger;
 
   return (
-    <article className="panel full-width">
+    <article className="panel">
       <div className="panel-header-row">
         <h2>TopLogger Sync</h2>
         {auth && (

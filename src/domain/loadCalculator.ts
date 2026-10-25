@@ -1,5 +1,4 @@
 import type { AppSettings, CalculationResult, Grade, GradeDisplayUnit, SessionInput } from "../types";
-import { GRADES } from "../types";
 import { FONT_BY_GRADE } from "../types";
 import { addDays, buildAcwrHistory, fillDailyLoads, todayIsoDate, type HistoryPoint } from "./acwr";
 
@@ -166,21 +165,6 @@ export function calculateSessionLoad(session: SessionInput, referenceGrade: Grad
   };
 }
 
-/** Problems of one grade that add up to `targetLoad`, for every grade. */
-export function calculateGradeDistribution(
-  targetLoad: number,
-  speedMultiplier: number,
-  referenceGrade: Grade,
-  settings: AppSettings,
-): Record<string, number> {
-  const distribution: Record<string, number> = {};
-  for (const grade of GRADES) {
-    const intensity = calculateGradeIntensity(grade, referenceGrade, settings);
-    distribution[grade] = Math.round(targetLoad / (intensity * speedMultiplier));
-  }
-  return distribution;
-}
-
 /** Daily bouldering load from the first session through `endDate` (default: today), rest days included. */
 export function buildDailyLoads(sessions: SessionInput[], settings: AppSettings, endDate: string = todayIsoDate()) {
   const loadsByDate = new Map<string, number>();
@@ -242,13 +226,6 @@ export function buildMovingAverageSeries(history: HistoryPoint[], windowDays: nu
   return points;
 }
 
-export function suggestedCapacityRange(climberMaxGrade: Grade): { min: number; max: number } {
-  const maxNumeric = gradeToNumber(climberMaxGrade);
-  const min = Math.max(0, maxNumeric * 0.4);
-  const max = Math.max(min, maxNumeric * 0.6);
-  return { min, max };
-}
-
 export type AcwrZoneKey = "detraining" | "goldilocks" | "high-risk";
 
 /** Stable key for styling and copy. */
@@ -272,6 +249,7 @@ export function assessReadiness(
   sleepQuality: number | undefined,
   stress: number,
   settings: AppSettings,
+  motivation?: number,
 ): Readiness {
   const reasons: string[] = [];
   let penalty = 0;
@@ -300,6 +278,11 @@ export function assessReadiness(
   } else if (stressShare >= 0.6) {
     penalty += 1;
     reasons.push("elevated stress");
+  }
+
+  if (motivation !== undefined && motivation / Math.max(1, settings.motivationScaleMax) <= 0.3) {
+    penalty += 1;
+    reasons.push("low motivation");
   }
 
   return { level: penalty >= 3 ? "low" : penalty >= 1 ? "fair" : "good", reasons };

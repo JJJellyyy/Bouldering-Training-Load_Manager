@@ -1,144 +1,81 @@
 # Boulder Load Manager
 
-Local-first web app for tracking bouldering load with configurable EWMA calculations.
+A local-first web app that tracks bouldering and strength training load, and helps you avoid the sudden jumps that lead
+to overuse injuries. It compares your recent load with what you are used to (ACWR) and suggests sessions that keep the
+two in balance.
 
-## What Is Implemented
+Live: https://boulder-load-manager.vercel.app
 
-- Session logging flow: problems count, grade (V4-V13), hold type, wall angle.
-- Session context: duration, sleep before session, stress, motivation.
-- Configurable load model values in settings:
-  - Grade intensity curve.
-  - Speed multiplier curve.
-  - Sleep penalty curve.
-- EWMA output per hold x angle combination for windows 10, 15, 20, 25.
-- Local persistence with IndexedDB (sessions, settings, EWMA snapshots, strength sets).
-- TopLogger sync: climbing days logged in TopLogger become bouldering sessions automatically.
-- Strength ACWR from FitNotes CSV exports (upload, or sync the latest export from Google Drive).
+## Features
 
-## TopLogger Sync
+- **Bouldering ACWR** from your sessions: EWMA acute/chronic ratio over all your climbing, updated daily (rest days count).
+- **Load relative to your current max**: each problem is scored against the hardest grade you've climbed on 2+ days in
+  the past year, so load stays meaningful as you get stronger.
+- **What to climb next**: three session options (volume, medium, high intensity) as grades × attempts that keep you in
+  the green zone. High intensity is never suggested while you are over or close to the high threshold.
+- **Trends & readiness**: week-over-week change, monotony, strain, and weekly sleep/stress charts. Sleep, stress and
+  motivation give a readiness verdict instead of changing load.
+- **TopLogger sync**: climbing days logged in TopLogger become sessions automatically.
+- **Strength ACWR** from FitNotes CSV exports (upload, or the latest export in your Google Drive).
+- **Google Drive backup**, JSON export/import, light/dark theme, and an in-app Guide that explains every number.
 
-TopLogger has no public API or OAuth, and its sign-in requires reCAPTCHA, so the app connects with a refresh token
-taken from a signed-in TopLogger web session (Session tab → TopLogger Sync shows a console snippet that copies it).
-The token is kept in this browser's localStorage only and rotates on every refresh.
+Everything is stored in the browser (IndexedDB). Nothing leaves the device except calls to TopLogger (when connected)
+and Google Drive (when signed in).
 
-- Requests go through `api/toplogger.ts` (a thin proxy, because TopLogger only allows CORS from app.toplogger.nu).
-  `npm run dev` uses an equivalent Vite proxy in `vite.config.ts`.
-- One session per TopLogger climb day. Grades map with TopLogger's own V-scale table, wall angle is guessed from the
-  wall name, hold type is `mixed`; duration uses the configured default and sleep the personal max.
-- Sessions you edit after syncing are marked and never overwritten by later syncs.
-- This uses TopLogger's private web-app API, so it can break if TopLogger changes it.
-
-## Strength (FitNotes)
-
-Export from FitNotes as CSV (`FitNotes_Export_*.csv`), then upload it on the Strength tab, or save it to Google Drive
-and use "Sync latest export from Google Drive" (optionally on every app start). Each import replaces all strength data.
-
-Per-set load metrics: relative intensity (reps × weight / best e1RM so far, the default), volume (kg × reps) or sets.
-Bodyweight is added for exercises marked "+BW". ACWR uses its own acute/chronic EWMA windows (default 7/28 days).
-
-Drive sync needs the `drive.readonly` scope (to see files FitNotes created). After this update, sign out and sign in
-with Google again so the new scope is granted, and add the scope to the OAuth consent screen in Google Cloud.
-
-## Run Locally
+## Run locally
 
 ```bash
 npm install
 npm run dev
 ```
 
-Open the local URL shown in the terminal.
+`npm run build` type-checks and builds to `dist/`; `npm run lint` runs ESLint.
 
-## Build
+To use Google sign-in locally, copy `.env.example` to `.env.local` and set `VITE_GOOGLE_CLIENT_ID`.
 
-```bash
-npm run build
-npm run preview
-```
+## Deploy (Vercel)
 
-## Deployment Recommendation
+1. Import the repository in Vercel (framework preset: Vite, output directory `dist`).
+2. Set the environment variable `VITE_GOOGLE_CLIENT_ID` for Production and Preview.
+3. Pushing to `main` deploys to production.
 
-Deploy on Vercel first.
+`api/toplogger.ts` is deployed as a Vercel function (see TopLogger below).
 
-Why this is a good fit:
-- Static React/Vite frontend deploys fast.
-- Easy preview URLs per commit.
-- Simple environment variable management when Google Drive sync is added.
+## Google sign-in and Drive
 
-### Vercel Steps
+Sign-in uses Google's browser token flow; no client secret or server is needed.
 
-1. Push this project to GitHub.
-2. Import the repository in Vercel.
-3. Framework preset: Vite.
-4. Build command: `npm run build`.
-5. Output directory: `dist`.
-6. Deploy.
+In Google Cloud Console:
 
-### Vercel CLI (optional)
+1. **Credentials → OAuth client ID** (Web application). Add your deployed origin and `http://localhost:5173` both as
+   *Authorized JavaScript origins* and as *Authorized redirect URIs*.
+2. **OAuth consent screen → Data access**: add the scopes `drive.file` (backups the app creates) and `drive.readonly`
+   (to find FitNotes exports other apps created). `drive.readonly` is a restricted scope, so keep the app in
+   **Testing** mode and add your users as test users.
 
-1. Install CLI globally: `npm i -g vercel`
-2. Login: `vercel login`
-3. Run first deploy: `vercel`
-4. Run production deploy: `npm run deploy:vercel`
+## TopLogger
 
-### Post Deploy Checks
+TopLogger has no public API or OAuth, and its sign-in requires reCAPTCHA, so the app connects with a refresh token from a
+signed-in TopLogger web session (the Bouldering tab shows a console snippet that copies it). The token is kept only in
+the browser's localStorage and rotates on every refresh.
 
-1. Open the deployed URL.
-2. Create a test session and refresh the page.
-3. Confirm the session is still present (IndexedDB persistence).
-4. Open Vercel project settings and set your production domain.
+- Requests go through `api/toplogger.ts`, a thin proxy, because TopLogger only allows CORS from its own site.
+  `npm run dev` uses an equivalent proxy configured in `vite.config.ts`.
+- One session per climb day. Grades use TopLogger's own V-scale table; wall angle is guessed from the wall name.
+- Sessions edited or deleted in the app are left alone by later syncs.
+- This relies on TopLogger's private web-app API and can break if TopLogger changes it.
 
-When Google Drive sync is added, register production and preview OAuth redirect URLs in Google Cloud.
+## Code layout
 
-## Google Drive OAuth Setup (Vercel + Google Cloud)
-
-This app now includes Google Drive backup/restore in the Settings tab.
-
-### 1) Create OAuth Client In Google Cloud
-
-1. Open Google Cloud Console.
-2. APIs & Services -> Credentials -> Create Credentials -> OAuth client ID.
-3. Application type: Web application.
-4. Add Authorized JavaScript origins:
-  - https://boulder-load-manager.vercel.app
-  - Your branch preview URL origin from Vercel (for example your stable main-branch preview domain)
-  - http://localhost:5173
-5. Add Authorized redirect URI entries:
-  - https://boulder-load-manager.vercel.app
-  - Your preview deployment URL
-  - http://localhost:5173
-
-Note: Vercel generates many preview URLs. Keep one stable preview URL for OAuth testing, or test Drive sync on production only.
-
-### 2) Add Client ID To Vercel
-
-1. Vercel Project -> Settings -> Environment Variables.
-2. Add variable: `VITE_GOOGLE_CLIENT_ID`.
-3. Value: your OAuth Client ID from Google Cloud.
-4. Set for Production and Preview.
-5. Redeploy.
-
-### 3) Add Client ID Locally
-
-1. Create `.env.local` from `.env.example`.
-2. Set `VITE_GOOGLE_CLIENT_ID=...`.
-3. Run `npm run dev`.
-
-### 4) Test Flow
-
-1. Open Settings -> Google Drive Sync.
-2. Click Connect Google Drive.
-3. Click Upload Backup.
-4. Click Restore Backup.
-
-## Core Files
-
-- `src/App.tsx` - Main UI and save flow.
-- `src/domain/loadCalculator.ts` - Grade intensity, speed multiplier, sleep penalty, session load.
-- `src/domain/ewma.ts` - EWMA updates.
-- `src/domain/loadModelConfig.ts` - Default and clamped model configuration.
-- `src/db/indexedDb.ts` - Local database access.
-- `src/types/index.ts` - Domain models and config types.
-- `src/domain/strengthLoad.ts` - Strength set loads, daily EWMA and ACWR per exercise/category.
-- `src/integrations/toplogger.ts` - TopLogger GraphQL client and session mapping.
-- `src/integrations/fitnotes.ts` - FitNotes CSV parser.
-- `api/toplogger.ts` - Vercel proxy to TopLogger's GraphQL API.
+- `src/App.tsx`: app shell, tabs, state and persistence flows.
+- `src/domain/`
+  - `acwr.ts`: daily EWMA/ACWR history, prediction, load solver, trend metrics.
+  - `loadCalculator.ts`: grade intensity, current max grade, session load, readiness.
+  - `recommendations.ts`: "What to climb next" options.
+  - `strengthLoad.ts`: strength set loads and ACWR per exercise/category.
+  - `wellness.ts`: weekly sleep and stress averages.
+  - `loadModelConfig.ts`: default settings and validation/migration.
+- `src/components/`: tabs, cards, the session form and the chart library (`charts/`).
+- `src/integrations/`: TopLogger client, FitNotes CSV parser, Google Drive.
+- `src/db/indexedDb.ts`: local storage.
+- `api/toplogger.ts`: Vercel proxy to TopLogger's GraphQL API.

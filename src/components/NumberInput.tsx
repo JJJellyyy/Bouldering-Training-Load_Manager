@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 interface NumberInputProps {
   value: number;
@@ -8,22 +8,31 @@ interface NumberInputProps {
   step?: number;
 }
 
-export function NumberInput({ value, onCommit, min, max, step }: NumberInputProps) {
-  const [text, setText] = useState<string>(String(value));
+/** Display a value with no more decimals than the step allows (0.25 → 2), so stored floats don't show 15 digits. */
+function formatForStep(value: number, step?: number): string {
+  const decimals = step === undefined ? 2 : (String(step).split(".")[1]?.length ?? 0);
+  return String(Number(value.toFixed(decimals)));
+}
 
-  useEffect(() => {
-    setText(String(value));
-  }, [value]);
+export function NumberInput({ value, onCommit, min, max, step }: NumberInputProps) {
+  const [text, setText] = useState<string>(formatForStep(value, step));
+  const [syncedValue, setSyncedValue] = useState(value);
+
+  // When the value changes from outside, show it (adjusting state during render, as React recommends over an effect).
+  if (value !== syncedValue) {
+    setSyncedValue(value);
+    setText(formatForStep(value, step));
+  }
 
   function commitValue() {
     if (text.trim() === "") {
-      setText(String(value));
+      setText(formatForStep(value, step));
       return;
     }
 
     const parsed = Number(text);
     if (Number.isNaN(parsed)) {
-      setText(String(value));
+      setText(formatForStep(value, step));
       return;
     }
 
@@ -36,7 +45,7 @@ export function NumberInput({ value, onCommit, min, max, step }: NumberInputProp
     }
 
     onCommit(next);
-    setText(String(next));
+    setText(formatForStep(next, step));
   }
 
   return (
@@ -54,7 +63,7 @@ export function NumberInput({ value, onCommit, min, max, step }: NumberInputProp
         }
 
         if (event.key === "Escape") {
-          setText(String(value));
+          setText(formatForStep(value, step));
         }
       }}
     />

@@ -69,21 +69,8 @@ export function isCalibrating(history: HistoryPoint[], chronicWindow: number): b
   return history.length < chronicWindow;
 }
 
-/**
- * Predict ACWR after adding `plannedLoad` on `plannedDate`, given history that runs through today.
- * Days between the end of history and the planned date count as rest days.
- */
-export function predictAcwr(
-  history: HistoryPoint[],
-  plannedDate: string,
-  plannedLoad: number,
-  acuteWindow: number,
-  chronicWindow: number,
-): { acwr: number; acute: number; chronic: number } | null {
-  if (history.length === 0) return null;
-
-  const acuteAlpha = 2 / (acuteWindow + 1);
-  const chronicAlpha = 2 / (chronicWindow + 1);
+/** The averages going into `plannedDate`, with rest days between the end of history and that date applied. */
+function stateBeforeDay(history: HistoryPoint[], plannedDate: string, acuteAlpha: number, chronicAlpha: number) {
   const dayBefore = addDays(plannedDate, -1);
   const last = history[history.length - 1];
 
@@ -101,10 +88,53 @@ export function predictAcwr(
 
   // Load already logged on the planned day still counts alongside the planned session.
   const existing = history.find((item) => item.date === plannedDate)?.load ?? 0;
+  return { prevAcute, prevChronic, existing };
+}
+
+/**
+ * Predict ACWR after adding `plannedLoad` on `plannedDate`, given history that runs through today.
+ * Days between the end of history and the planned date count as rest days.
+ */
+export function predictAcwr(
+  history: HistoryPoint[],
+  plannedDate: string,
+  plannedLoad: number,
+  acuteWindow: number,
+  chronicWindow: number,
+): { acwr: number; acute: number; chronic: number } | null {
+  if (history.length === 0) return null;
+
+  const acuteAlpha = 2 / (acuteWindow + 1);
+  const chronicAlpha = 2 / (chronicWindow + 1);
+  const { prevAcute, prevChronic, existing } = stateBeforeDay(history, plannedDate, acuteAlpha, chronicAlpha);
+
   const dayLoad = existing + plannedLoad;
   const acute = acuteAlpha * dayLoad + (1 - acuteAlpha) * prevAcute;
   const chronic = chronicAlpha * dayLoad + (1 - chronicAlpha) * prevChronic;
   return { acwr: chronic > 0 ? acute / chronic : 0, acute, chronic };
+}
+
+/**
+ * The session load that lands ACWR exactly on `targetAcwr` on `plannedDate` (0 if rest already gets there or beyond).
+ * Solves target = (αa·X + (1−αa)·A) / (αc·X + (1−αc)·C) for the day's total load X; null when the target is unreachable.
+ */
+export function solveLoadForAcwr(
+  history: HistoryPoint[],
+  plannedDate: string,
+  targetAcwr: number,
+  acuteWindow: number,
+  chronicWindow: number,
+): number | null {
+  if (history.length === 0) return null;
+
+  const acuteAlpha = 2 / (acuteWindow + 1);
+  const chronicAlpha = 2 / (chronicWindow + 1);
+  const denominator = acuteAlpha - targetAcwr * chronicAlpha;
+  if (denominator <= 0) return null;
+
+  const { prevAcute, prevChronic, existing } = stateBeforeDay(history, plannedDate, acuteAlpha, chronicAlpha);
+  const dayLoad = (targetAcwr * (1 - chronicAlpha) * prevChronic - (1 - acuteAlpha) * prevAcute) / denominator;
+  return Math.max(0, dayLoad - existing);
 }
 
 export interface TrendMetrics {

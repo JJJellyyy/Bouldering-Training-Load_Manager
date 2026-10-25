@@ -10,7 +10,6 @@ const DRIVE_SCOPE = [
 ].join(" ");
 const BACKUP_BASE_NAME = "boulder-load-manager-backup";
 const MAX_BACKUP_COPIES = 5;
-const CODE_VERIFIER_KEY = "google_oauth_code_verifier";
 
 export interface GoogleAuthSession {
   accessToken: string;
@@ -28,12 +27,6 @@ export interface GoogleProfile {
 export async function initiateGoogleOAuthRedirect(clientId: string): Promise<void> {
   const redirectUri = window.location.origin + "/";
 
-  console.log("OAuth Debug Info:", {
-    clientId: clientId.split(".")[0] + "...",
-    redirectUri,
-    flow: "implicit token flow",
-  });
-
   const params = new URLSearchParams({
     client_id: clientId,
     redirect_uri: redirectUri,
@@ -46,12 +39,10 @@ export async function initiateGoogleOAuthRedirect(clientId: string): Promise<voi
 }
 
 /**
- * Check if Google redirected back to us with an auth code in the URL query.
- * Exchanges the code for an access token via a backend endpoint.
- * Returns session on success, throws an error string if Google returned an error,
- * or returns null if no OAuth response is present.
+ * Check if Google redirected back with an access token in the URL fragment (browser token flow).
+ * Returns the session, throws if Google returned an error, or returns null if there is no OAuth response.
  */
-export async function extractOAuthTokenFromUrl(clientId: string): Promise<GoogleAuthSession | null> {
+export async function extractOAuthTokenFromUrl(): Promise<GoogleAuthSession | null> {
   const searchParams = new URLSearchParams(window.location.search);
   const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
 
@@ -79,39 +70,7 @@ export async function extractOAuthTokenFromUrl(clientId: string): Promise<Google
     };
   }
 
-  const code = searchParams.get("code");
-  if (!code) return null;
-
-  const codeVerifier = sessionStorage.getItem(CODE_VERIFIER_KEY);
-  if (!codeVerifier) {
-    throw new Error("OAuth session lost. Please try again.");
-  }
-
-  window.history.replaceState(null, "", window.location.pathname);
-  sessionStorage.removeItem(CODE_VERIFIER_KEY);
-
-  const redirectUri = window.location.origin + "/";
-  const response = await fetch("/api/oauth/exchange", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      code,
-      code_verifier: codeVerifier,
-      client_id: clientId,
-      redirect_uri: redirectUri,
-    }),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Failed to exchange auth code for token: ${errorText}`);
-  }
-
-  const data = (await response.json()) as { access_token: string; expires_in: number };
-  return {
-    accessToken: data.access_token,
-    expiresAt: Date.now() + data.expires_in * 1000,
-  };
+  return null;
 }
 
 export async function fetchGoogleProfile(accessToken: string): Promise<GoogleProfile> {
@@ -190,7 +149,7 @@ export async function uploadBackupToGoogleDrive(
         if (f.id) await deleteDriveFile(accessToken, f.id);
       }
     }
-  } catch (err) {
+  } catch {
     // Non-fatal: log in caller; do not fail upload because cleanup failed.
   }
 }
