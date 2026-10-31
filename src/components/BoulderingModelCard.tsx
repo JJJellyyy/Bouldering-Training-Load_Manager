@@ -63,6 +63,20 @@ export function BoulderingModelCard({
           <span className="range-value">{speed.impactPercent}%</span>
         </label>
         <label>
+          Board multiplier
+          <NumberInput
+            value={settings.model.boardMultiplier}
+            min={1}
+            max={2}
+            step={0.05}
+            onCommit={(value) =>
+              patchSettings((next) => {
+                next.model.boardMultiplier = value;
+              })
+            }
+          />
+        </label>
+        <label>
           Acute window (days)
           <NumberInput
             value={acwr.acuteWindow}
@@ -98,7 +112,8 @@ export function BoulderingModelCard({
       <p className="muted-hint">
         Loads are measured against your current max: the hardest grade you've logged on at least two different days in the past year.
         Each grade above it multiplies the points by {gradeIntensity.multiplierPerGrade.toFixed(2)}; each grade below divides them.
-        Sleep and stress don't change load; they show up as readiness.
+        Board problems (Kilter, Tension, MoonBoard, spray walls, or any wall logged as "board") count{" "}
+        {settings.model.boardMultiplier.toFixed(2)}× at the same grade. Sleep and stress don't change load; they show up as readiness.
       </p>
 
       <details>

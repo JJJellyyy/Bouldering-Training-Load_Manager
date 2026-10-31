@@ -19,6 +19,7 @@ const SECTIONS = [
   { id: "readiness", title: "Sleep, stress & readiness" },
   { id: "strength", title: "Strength (FitNotes)" },
   { id: "toplogger", title: "TopLogger sync" },
+  { id: "boardsesh", title: "Boardsesh (boards)" },
   { id: "data", title: "Your data" },
   { id: "maths", title: "The maths, step by step" },
   { id: "faq", title: "FAQ" },
@@ -114,7 +115,8 @@ export function GuideTab({ settings, referenceGrade }: { settings: AppSettings; 
           <ol className="guide-steps">
             <li>
               <strong>Get your climbing in.</strong> At a TopLogger gym, connect TopLogger on the Bouldering tab and your
-              sessions sync by themselves. Otherwise log them on the Sessions tab.
+              sessions sync by themselves. Board sessions (Kilter, Tension, MoonBoard…) come in through Boardsesh. Anything
+              else you log on the Sessions tab.
             </li>
             <li>
               <strong>Add your strength training</strong> (optional). Export your workouts from FitNotes as CSV and import them
@@ -154,13 +156,20 @@ export function GuideTab({ settings, referenceGrade }: { settings: AppSettings; 
               Climbing many problems in little time is harder than the same problems spread out. At 10 minutes or more per
               problem there's no bonus; at 1 minute per problem load goes up by {settings.model.speed.impactPercent}%.
             </dd>
+            <dt>Boards</dt>
+            <dd>
+              Kilter, Tension, MoonBoard and spray walls are steep and crimpy, so a board problem counts{" "}
+              <strong>{settings.model.boardMultiplier.toFixed(2)}×</strong> the load of the same grade on a gym wall. That covers
+              Boardsesh sessions, TopLogger walls with "board" in the name, and anything you log with the wall set to "board". You
+              can change the multiplier in the Bouldering load model.
+            </dd>
             <dt>What doesn't count</dt>
             <dd>
               Sleep and stress. A bad night doesn't make a session bigger, it makes you less ready for one, so those show up as
               readiness instead.
             </dd>
           </dl>
-          <p className="guide-formula">session load = Σ (problems × points) × pace</p>
+          <p className="guide-formula">session load = Σ (problems × points × board) × pace</p>
         </article>
 
         <article className="panel guide-section" id="guide-acwr">
@@ -332,11 +341,31 @@ export function GuideTab({ settings, referenceGrade }: { settings: AppSettings; 
           </dl>
         </article>
 
+        <article className="panel guide-section" id="guide-boardsesh">
+          <h2>Boardsesh (boards)</h2>
+          <p>
+            Boardsesh keeps your logbook for Kilter, Tension, MoonBoard and other LED or spray boards. Connect it on the
+            Bouldering tab by searching your name or pasting your profile link (boardsesh.com/profile/…). No password is needed:
+            the app reads your public logbook, so your Boardsesh profile has to be public.
+          </p>
+          <dl className="guide-terms">
+            <dt>What comes in</dt>
+            <dd>
+              Each day on a board becomes one session. Sends use the grade you gave, attempts the community grade. The same
+              counting options as TopLogger apply: every climb tried, only sends, or every try.
+            </dd>
+            <dt>Board load</dt>
+            <dd>Every Boardsesh problem is a board problem, so it counts {settings.model.boardMultiplier.toFixed(2)}× its grade.</dd>
+            <dt>Editing and deleting</dt>
+            <dd>Like TopLogger: fill in duration, sleep and stress in History; later syncs keep your edits and deletions.</dd>
+          </dl>
+        </article>
+
         <article className="panel guide-section" id="guide-data">
           <h2>Your data</h2>
           <p>
-            Everything is stored in this browser on this device. Nothing is sent anywhere unless you connect TopLogger (to read
-            your climbs) or Google Drive (to store your backups in your own Drive).
+            Everything is stored in this browser on this device. Nothing is sent anywhere unless you connect TopLogger or
+            Boardsesh (to read your climbs) or Google Drive (to store your backups in your own Drive).
           </p>
           <ul className="guide-list">
             <li>Signed in with Google, you can upload a backup to Drive and restore it on another device (Settings).</li>

@@ -12,6 +12,12 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: () => '/graphql',
       },
+      // Dev stand-in for api/boardsesh.ts (the production proxy also allow-lists the queries).
+      '/api/boardsesh': {
+        target: 'https://ws.boardsesh.com',
+        changeOrigin: true,
+        rewrite: () => '/graphql',
+      },
     },
   },
 })

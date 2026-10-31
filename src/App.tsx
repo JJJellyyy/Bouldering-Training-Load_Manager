@@ -31,6 +31,8 @@ import { BoulderingModelCard } from "./components/BoulderingModelCard";
 import { GradeBreakdownTable } from "./components/GradeBreakdownTable";
 import { RecommendationCard } from "./components/RecommendationCard";
 import { GapsCard } from "./components/GapsCard";
+import { BoardseshPanel } from "./components/BoardseshPanel";
+import { boardseshDayToSession, fetchBoardseshDays, type BoardseshUser } from "./integrations/boardsesh";
 import type { GapDecision } from "./domain/gaps";
 import { SessionForm, type SessionDraft } from "./components/SessionForm";
 import { buildRecommendation } from "./domain/recommendations";
@@ -122,6 +124,8 @@ function App() {
   const [toploggerAuth, setToploggerAuth] = useState<TopLoggerAuth | undefined>(() => readTopLoggerAuth());
   const [toploggerStatus, setToploggerStatus] = useState<string | undefined>();
   const [toploggerSyncing, setToploggerSyncing] = useState(false);
+  const [boardseshStatus, setBoardseshStatus] = useState<string | undefined>();
+  const [boardseshSyncing, setBoardseshSyncing] = useState(false);
   const [draft, setDraft] = useState<SessionDraft>(createSessionDraft(DEFAULT_SETTINGS));
   const [editingSessionId, setEditingSessionId] = useState<string | undefined>();
   const [editDraft, setEditDraft] = useState<SessionDraft | undefined>();
@@ -364,6 +368,9 @@ function App() {
       if (storedTopLoggerAuth && nextSettings.toplogger.autoSync) {
         void syncTopLogger(storedTopLoggerAuth, nextSettings);
       }
+      if (nextSettings.boardsesh.userId && nextSettings.boardsesh.autoSync) {
+        void syncBoardsesh(nextSettings.boardsesh.userId, nextSettings);
+      }
       if (activeDriveToken && nextSettings.fitnotes.autoSyncFromDrive) {
         void syncFitNotesFromDrive(activeDriveToken, nextSettings, true);
       }
@@ -417,6 +424,15 @@ function App() {
     if (!window.confirm(`Delete the session of ${label}? This can't be undone.`)) return;
 
     await deleteSession(session.id);
+    if (session.source === "boardsesh") {
+      const day = getSessionDayKey(session);
+      setSettings((previous) =>
+        clampSettings({
+          ...previous,
+          boardsesh: { ...previous.boardsesh, ignoredDays: [...new Set([...(previous.boardsesh.ignoredDays ?? []), day])] },
+        }),
+      );
+    }
     if (session.source === "toplogger" && session.externalId) {
       const dayId = session.externalId;
       setSettings((previous) =>
@@ -598,6 +614,104 @@ function App() {
     return problems.map((problem) => `${problem.grade}|${problem.wallAngle}|${problem.count}`).sort().join(",");
   }
 
+  /**
+   * Merge synced sessions into storage: new days are added, changed days updated, and days you edited by hand are
+   * left alone. Duration, sleep, stress and motivation you filled in survive re-syncs.
+   */
+  async function mergeSyncedSessions(synced: SessionInput[]): Promise<{ added: number; updated: number }> {
+    const sessionsById = new Map((await loadSessions()).map((item) => [item.id, item]));
+    let added = 0;
+    let updated = 0;
+
+    for (const session of synced) {
+      const existing = sessionsById.get(session.id);
+      if (existing?.locallyEdited) continue;
+
+      if (existing) {
+        if (
+          problemsSignature(existing.problems) === problemsSignature(session.problems) &&
+          JSON.stringify(existing.toplogger) === JSON.stringify(session.toplogger) &&
+          JSON.stringify(existing.boardsesh) === JSON.stringify(session.boardsesh)
+        ) {
+          continue;
+        }
+        const merged: SessionInput = {
+          ...session,
+          durationMinutes: existing.durationMinutes,
+          sleepHours: existing.sleepHours,
+          stress: existing.stress,
+          motivation: existing.motivation,
+        };
+        await saveSession(merged);
+        sessionsById.set(merged.id, merged);
+        updated++;
+      } else {
+        await saveSession(session);
+        sessionsById.set(session.id, session);
+        added++;
+      }
+    }
+
+    if (added + updated > 0) {
+      const allSessions = Array.from(sessionsById.values());
+      setSessions(allSessions.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()));
+    }
+    return { added, updated };
+  }
+
+  async function syncBoardsesh(userId: string, settingsForSync: AppSettings): Promise<void> {
+    setBoardseshSyncing(true);
+    setBoardseshStatus("Syncing Boardsesh…");
+
+    try {
+      const { importFromDate, lastSyncedAt, ignoredDays } = settingsForSync.boardsesh;
+      // Re-check a few days before the last sync to catch climbs logged late.
+      const lastSyncedDay = lastSyncedAt ? addDays(lastSyncedAt.slice(0, 10), -3) : undefined;
+      const since = lastSyncedDay && lastSyncedDay > importFromDate ? lastSyncedDay : importFromDate;
+
+      const days = await fetchBoardseshDays(userId, since);
+      const synced = days
+        .filter((day) => !ignoredDays?.includes(day.date))
+        .map((day) => boardseshDayToSession(day, userId, settingsForSync))
+        .filter((session): session is SessionInput => session !== undefined);
+      const { added, updated } = await mergeSyncedSessions(synced);
+
+      setSettings((previous) =>
+        clampSettings({ ...previous, boardsesh: { ...previous.boardsesh, lastSyncedAt: new Date().toISOString() } }),
+      );
+      setBoardseshStatus(
+        days.length === 0 && !lastSyncedAt
+          ? "No public board climbs found since " + since + ". If your Boardsesh profile is private, make it public to sync."
+          : `Boardsesh: checked ${days.length} board days since ${since}: ${added} new, ${updated} updated.`,
+      );
+      if (added + updated > 0) {
+        showNotification(`Boardsesh sync: ${added} new, ${updated} updated sessions.`);
+      }
+    } catch (error) {
+      setBoardseshStatus(`Boardsesh sync failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setBoardseshSyncing(false);
+    }
+  }
+
+  function handleBoardseshConnect(user: BoardseshUser): void {
+    const nextSettings = clampSettings({
+      ...settings,
+      boardsesh: { ...settings.boardsesh, userId: user.id, displayName: user.displayName, lastSyncedAt: undefined },
+    });
+    setSettings(nextSettings);
+    void syncBoardsesh(user.id, nextSettings);
+  }
+
+  function handleBoardseshDisconnect(): void {
+    patchSettings((next) => {
+      next.boardsesh.userId = undefined;
+      next.boardsesh.displayName = undefined;
+      next.boardsesh.lastSyncedAt = undefined;
+    });
+    setBoardseshStatus("Boardsesh disconnected. Synced sessions stay in your history.");
+  }
+
   async function syncTopLogger(auth: TopLoggerAuth, settingsForSync: AppSettings): Promise<void> {
     setToploggerSyncing(true);
     setToploggerStatus("Syncing TopLogger…");
@@ -613,46 +727,11 @@ function App() {
       const { auth: nextAuth, days } = await fetchTopLoggerBoulderDays(auth, since);
       setToploggerAuth(nextAuth);
 
-      const sessionsById = new Map((await loadSessions()).map((item) => [item.id, item]));
-      let added = 0;
-      let updated = 0;
-
-      for (const day of days) {
-        if (settingsForSync.toplogger.ignoredDayIds?.includes(day.id)) continue;
-        const synced = topLoggerDayToSession(day, settingsForSync);
-        if (!synced) continue;
-
-        const existing = sessionsById.get(synced.id);
-        if (existing?.locallyEdited) continue;
-
-        if (existing) {
-          if (
-            problemsSignature(existing.problems) === problemsSignature(synced.problems) &&
-            JSON.stringify(existing.toplogger) === JSON.stringify(synced.toplogger)
-          ) {
-            continue;
-          }
-          const merged: SessionInput = {
-            ...synced,
-            durationMinutes: existing.durationMinutes,
-            sleepHours: existing.sleepHours,
-            stress: existing.stress,
-            motivation: existing.motivation,
-          };
-          await saveSession(merged);
-          sessionsById.set(merged.id, merged);
-          updated++;
-        } else {
-          await saveSession(synced);
-          sessionsById.set(synced.id, synced);
-          added++;
-        }
-      }
-
-      if (added + updated > 0) {
-        const allSessions = Array.from(sessionsById.values());
-        setSessions(allSessions.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()));
-      }
+      const synced = days
+        .filter((day) => !settingsForSync.toplogger.ignoredDayIds?.includes(day.id))
+        .map((day) => topLoggerDayToSession(day, settingsForSync))
+        .filter((session): session is SessionInput => session !== undefined);
+      const { added, updated } = await mergeSyncedSessions(synced);
 
       setSettings((previous) =>
         clampSettings({ ...previous, toplogger: { ...previous.toplogger, lastSyncedAt: new Date().toISOString() } }),
@@ -783,7 +862,8 @@ function App() {
       source: existing?.source ?? "manual",
       externalId: existing?.externalId,
       toplogger: existing?.toplogger,
-      locallyEdited: existing?.source === "toplogger" ? true : undefined,
+      boardsesh: existing?.boardsesh,
+      locallyEdited: existing?.source === "toplogger" || existing?.source === "boardsesh" ? true : undefined,
     };
 
     // The fallback max grade (used before there is history) follows the hardest grade you log.
@@ -982,8 +1062,9 @@ function App() {
 
       {tab === "bouldering" && (
         <section className="panel-grid">
-          <article className="panel">
+          <article className="panel full-width">
             <h2>Bouldering ACWR</h2>
+            <div className="acwr-overview">
             {overallAcwr === null ? (
               <p className="empty-note">Save a session to see your ACWR.</p>
             ) : (
@@ -1002,8 +1083,9 @@ function App() {
                 )}
               </div>
             )}
+            <div>
             <h3 className="facts-heading">This week on the wall</h3>
-            <dl className="fact-list">
+            <dl className="fact-list fact-list-3">
               <div>
                 <dt>Load, last 7 days</dt>
                 <dd>{trends.thisWeekLoad.toFixed(0)}</dd>
@@ -1040,6 +1122,8 @@ function App() {
                 <dd>{sessions[0] ? formatLongDate(getSessionDayKey(sessions[0])) : "–"}</dd>
               </div>
             </dl>
+            </div>
+            </div>
           </article>
 
           <TopLoggerPanel
@@ -1052,6 +1136,18 @@ function App() {
             onDisconnect={handleTopLoggerDisconnect}
             onSync={() => {
               if (toploggerAuth) void syncTopLogger(toploggerAuth, settings);
+            }}
+          />
+
+          <BoardseshPanel
+            settings={settings}
+            patchSettings={patchSettings}
+            status={boardseshStatus}
+            syncing={boardseshSyncing}
+            onConnect={handleBoardseshConnect}
+            onDisconnect={handleBoardseshDisconnect}
+            onSync={() => {
+              if (settings.boardsesh.userId) void syncBoardsesh(settings.boardsesh.userId, settings);
             }}
           />
 
@@ -1429,7 +1525,19 @@ function App() {
                             </td>
                             <td className="num">{session.stress}</td>
                             <td>
-                              {session.source === "toplogger" ? (
+                              {session.source === "boardsesh" ? (
+                                <>
+                                  <span className="source-badge" title={session.locallyEdited ? "Edited after sync" : "Synced from Boardsesh"}>
+                                    Boardsesh{session.locallyEdited ? " ✎" : ""}
+                                  </span>
+                                  {session.boardsesh && (
+                                    <span className="source-stats">
+                                      {session.boardsesh.climbsTried} tried · {session.boardsesh.climbsSent} sent · {session.boardsesh.tries} tries ·{" "}
+                                      {session.boardsesh.boards.join(", ")}
+                                    </span>
+                                  )}
+                                </>
+                              ) : session.source === "toplogger" ? (
                                 <>
                                   <span className="source-badge" title={session.locallyEdited ? "Edited after sync" : "Synced from TopLogger"}>
                                     TopLogger{session.locallyEdited ? " ✎" : ""}

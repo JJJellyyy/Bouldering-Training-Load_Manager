@@ -150,12 +150,19 @@ export function referenceGradeOn(dayKey: string, sessions: SessionInput[], setti
   return gradeFromNumber(repeated ?? grades[0]);
 }
 
-/** Session load = Σ problems × grade intensity (vs. reference grade) × pace multiplier. Sleep and stress are not load. */
+/**
+ * Session load = Σ problems × grade intensity (vs. reference grade) × board multiplier (board problems only) × pace.
+ * Sleep and stress are not load.
+ */
 export function calculateSessionLoad(session: SessionInput, referenceGrade: Grade, settings: AppSettings): CalculationResult {
   const totalProblems = session.problems.reduce((sum, item) => sum + item.count, 0);
   const speedMultiplier = calculateSpeedMultiplier(totalProblems, session.durationMinutes, settings);
   const rawLoad = session.problems.reduce(
-    (sum, problem) => sum + problem.count * calculateGradeIntensity(problem.grade, referenceGrade, settings),
+    (sum, problem) =>
+      sum +
+      problem.count *
+        calculateGradeIntensity(problem.grade, referenceGrade, settings) *
+        (problem.wallAngle === "board" ? settings.model.boardMultiplier : 1),
     0,
   );
 

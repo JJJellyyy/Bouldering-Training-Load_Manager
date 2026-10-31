@@ -49,7 +49,7 @@ export type HoldType = (typeof HOLD_TYPES)[number];
 export type WallAngle = (typeof WALL_ANGLES)[number];
 
 export type GradeDisplayUnit = "v" | "font";
-export type SessionSource = "manual" | "toplogger";
+export type SessionSource = "manual" | "toplogger" | "boardsesh";
 export type StrengthLoadMetric = "relative" | "volume" | "sets";
 export type TopLoggerCountMode = "attempted" | "sent" | "tries";
 
@@ -79,6 +79,16 @@ export interface SessionInput {
   locallyEdited?: boolean;
   /** What TopLogger recorded for this day, kept so synced sessions can be checked against the app. */
   toplogger?: TopLoggerSessionStats;
+  /** What Boardsesh recorded for this day (board sessions). */
+  boardsesh?: BoardseshSessionStats;
+}
+
+export interface BoardseshSessionStats {
+  /** Boards climbed on that day, e.g. ["kilter 40°", "spray"]. */
+  boards: string[];
+  climbsTried: number;
+  climbsSent: number;
+  tries: number;
 }
 
 export interface TopLoggerSessionStats {
@@ -112,6 +122,8 @@ export interface LoadModelConfig {
   gradeIntensity: GradeIntensityConfig;
   speed: SpeedMultiplierConfig;
   recovery: RecoveryConfig;
+  /** Load multiplier for problems on a board (Kilter, Tension, MoonBoard, spray wall…) at the same grade. */
+  boardMultiplier: number;
   acwr: {
     acuteWindow: number;
     chronicWindow: number;
@@ -140,6 +152,19 @@ export interface TopLoggerConfig {
   ignoredDayIds?: string[];
 }
 
+export interface BoardseshConfig {
+  /** Boardsesh user id (from search or a profile link); absent when not connected. */
+  userId?: string;
+  displayName?: string;
+  autoSync: boolean;
+  importFromDate: string;
+  countMode: TopLoggerCountMode;
+  defaultDurationMinutes: number;
+  lastSyncedAt?: string;
+  /** Days (YYYY-MM-DD) whose synced session you deleted here, so syncing doesn't bring them back. */
+  ignoredDays?: string[];
+}
+
 export interface FitNotesConfig {
   autoSyncFromDrive: boolean;
   lastImport?: {
@@ -159,6 +184,7 @@ export interface AppSettings {
   model: LoadModelConfig;
   strength: StrengthConfig;
   toplogger: TopLoggerConfig;
+  boardsesh: BoardseshConfig;
   fitnotes: FitNotesConfig;
   /** Your answer per gap in the log (keyed by gap id): climbing but not logging, or a real break. */
   logGaps: Record<string, "climbing" | "break">;

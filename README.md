@@ -16,6 +16,8 @@ Live: https://boulder-load-manager.vercel.app
 - **Trends & readiness**: week-over-week change, monotony, strain, and weekly sleep/stress charts. Sleep, stress and
   motivation give a readiness verdict instead of changing load.
 - **TopLogger sync**: climbing days logged in TopLogger become sessions automatically.
+- **Boardsesh sync**: board sessions (Kilter, Tension, MoonBoard, spray walls…) from a public Boardsesh logbook. Board
+  problems count 1.2× the load of the same grade (configurable).
 - **Strength ACWR** from FitNotes CSV exports (upload, or the latest export in your Google Drive).
 - **Google Drive backup**, JSON export/import, light/dark theme, and an in-app Guide that explains every number.
 
@@ -65,6 +67,14 @@ the browser's localStorage and rotates on every refresh.
 - Sessions edited or deleted in the app are left alone by later syncs.
 - This relies on TopLogger's private web-app API and can break if TopLogger changes it.
 
+## Boardsesh
+
+Boardsesh's public API is for integrations that read a climber's own data; see their
+[hosted service terms](https://github.com/boardsesh/boardsesh/blob/main/LEGAL.md#hosted-service--api-access). The app
+reads only the climber's public logbook (`userAscentsFeed`), found via `searchUsers` or a pasted profile link, with no
+credentials. `api/boardsesh.ts` is a read-only proxy (Boardsesh only allows CORS from its own sites) that forwards just
+those queries and identifies the app in its User-Agent.
+
 ## Code layout
 
 - `src/App.tsx`: app shell, tabs, state and persistence flows.
@@ -76,6 +86,6 @@ the browser's localStorage and rotates on every refresh.
   - `wellness.ts`: weekly sleep and stress averages.
   - `loadModelConfig.ts`: default settings and validation/migration.
 - `src/components/`: tabs, cards, the session form and the chart library (`charts/`).
-- `src/integrations/`: TopLogger client, FitNotes CSV parser, Google Drive.
+- `src/integrations/`: TopLogger and Boardsesh clients, FitNotes CSV parser, Google Drive.
 - `src/db/indexedDb.ts`: local storage.
-- `api/toplogger.ts`: Vercel proxy to TopLogger's GraphQL API.
+- `api/toplogger.ts`, `api/boardsesh.ts`: Vercel proxies to TopLogger's and Boardsesh's GraphQL APIs.

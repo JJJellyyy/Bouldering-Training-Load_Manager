@@ -12,9 +12,9 @@ export interface WeeklyWellness {
   stress: number | null;
 }
 
-/** Synced TopLogger sessions only carry default sleep/stress until you edit them, so they don't count. */
+/** Synced sessions (TopLogger, Boardsesh) only carry default sleep/stress until you edit them, so they don't count. */
 export function hasWellnessData(session: SessionInput): boolean {
-  return session.source !== "toplogger" || session.locallyEdited === true;
+  return session.source === undefined || session.source === "manual" || session.locallyEdited === true;
 }
 
 export function weekStartOf(isoDate: string): string {

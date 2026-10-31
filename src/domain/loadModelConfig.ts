@@ -17,6 +17,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     recovery: {
       personalMaxSleepHours: 8.5,
     },
+    boardMultiplier: 1.2,
     acwr: {
       acuteWindow: 10,
       chronicWindow: 25,
@@ -37,6 +38,12 @@ export const DEFAULT_SETTINGS: AppSettings = {
     importFromDate: daysAgoIsoDate(90),
     countMode: "attempted",
     defaultDurationMinutes: 120,
+  },
+  boardsesh: {
+    autoSync: true,
+    importFromDate: daysAgoIsoDate(90),
+    countMode: "attempted",
+    defaultDurationMinutes: 90,
   },
   fitnotes: {
     autoSyncFromDrive: false,
@@ -71,6 +78,7 @@ export function clampSettings(input: AppSettings): AppSettings {
           incoming.model?.recovery?.personalMaxSleepHours ??
           DEFAULT_SETTINGS.model.recovery.personalMaxSleepHours,
       },
+      boardMultiplier: incoming.model?.boardMultiplier ?? DEFAULT_SETTINGS.model.boardMultiplier,
       acwr: {
         ...DEFAULT_SETTINGS.model.acwr,
         ...(incoming.model?.acwr ?? {}),
@@ -85,6 +93,10 @@ export function clampSettings(input: AppSettings): AppSettings {
     toplogger: {
       ...DEFAULT_SETTINGS.toplogger,
       ...(incoming.toplogger ?? {}),
+    },
+    boardsesh: {
+      ...DEFAULT_SETTINGS.boardsesh,
+      ...(incoming.boardsesh ?? {}),
     },
     fitnotes: {
       ...DEFAULT_SETTINGS.fitnotes,
@@ -105,6 +117,7 @@ export function clampSettings(input: AppSettings): AppSettings {
   next.model.speed.impactPercent = clamp(next.model.speed.impactPercent, 0, 100);
 
   next.model.recovery.personalMaxSleepHours = clamp(next.model.recovery.personalMaxSleepHours, 4, 12);
+  next.model.boardMultiplier = clamp(next.model.boardMultiplier, 1, 2);
   next.model.acwr.lowThreshold = clamp(next.model.acwr.lowThreshold, 0.3, 1.5);
   next.model.acwr.highThreshold = clamp(next.model.acwr.highThreshold, next.model.acwr.lowThreshold + 0.05, 2.5);
   next.model.acwr.acuteWindow = clamp(next.model.acwr.acuteWindow, 3, 60);
@@ -122,6 +135,14 @@ export function clampSettings(input: AppSettings): AppSettings {
     next.toplogger.countMode = DEFAULT_SETTINGS.toplogger.countMode;
   }
   next.toplogger.defaultDurationMinutes = clamp(Math.round(next.toplogger.defaultDurationMinutes), 10, 600);
+
+  if (!["attempted", "sent", "tries"].includes(next.boardsesh.countMode)) {
+    next.boardsesh.countMode = DEFAULT_SETTINGS.boardsesh.countMode;
+  }
+  next.boardsesh.defaultDurationMinutes = clamp(Math.round(next.boardsesh.defaultDurationMinutes), 10, 600);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(next.boardsesh.importFromDate)) {
+    next.boardsesh.importFromDate = DEFAULT_SETTINGS.boardsesh.importFromDate;
+  }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(next.toplogger.importFromDate)) {
     next.toplogger.importFromDate = DEFAULT_SETTINGS.toplogger.importFromDate;
   }
